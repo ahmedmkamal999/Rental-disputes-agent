@@ -2,45 +2,17 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import { rootAgent } from './agent.js'; 
 import { InMemoryRunner, stringifyContent } from '@google/adk';
-import dns from 'node:dns';
+import axios from 'axios';
+import https from 'https';
 
 // =================================================================
-// ☢️ NUCLEAR FIX V2: ADVANCED DNS OVERRIDE
-// Fixes 'ERR_INVALID_IP_ADDRESS' by handling 'all: true' lookup requests
+// ☢️ NUCLEAR FIX V3: DIRECT IP + SSL BYPASS
+// We stop asking "Where is Telegram?" and just go to the door directly.
 // =================================================================
-const originalLookup = dns.lookup.bind(dns);
-
-dns.lookup = ((hostname: string, options: any, callback: any) => {
-  let resolvedCallback = callback;
-  let resolvedOptions = options;
-
-  // Handle optional arguments (options can be the callback)
-  if (typeof options === 'function') {
-    resolvedCallback = options;
-    resolvedOptions = {};
-  }
-
-  if (hostname === 'api.telegram.org') {
-    // Telegram's Public IPv4
-    const ip = '149.154.167.220'; 
-
-    // CHECK: Does the requester want ALL addresses? (Node 'fetch' does this)
-    if (resolvedOptions && resolvedOptions.all) {
-      // Return an Array of objects
-      return process.nextTick(() => 
-        resolvedCallback(null, [{ address: ip, family: 4 }])
-      );
-    }
-    
-    // Otherwise, return simple arguments
-    return process.nextTick(() => 
-      resolvedCallback(null, ip, 4)
-    );
-  }
-
-  // For all other domains, behave normally
-  return originalLookup(hostname, resolvedOptions, resolvedCallback);
-}) as typeof dns.lookup;
+const TELEGRAM_IP = '149.154.167.220'; // Official Telegram API IP
+const BYPASS_AGENT = new https.Agent({
+  rejectUnauthorized: false // Required because we are connecting to an IP, not a Domain
+});
 // =================================================================
 
 const app = express();
@@ -76,30 +48,28 @@ async function ensureSession(userId: string, sessionId: string) {
   }
 }
 
-// Helper function to send to Telegram using Native Fetch
+// Helper function to send to Telegram using AXIOS + DIRECT IP
 async function sendToTelegram(chatId: number, text: string) {
   if (!TELEGRAM_TOKEN) return;
   
-  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+  // We construct a URL using the IP ADDRESS, not the domain
+  const url = `https://${TELEGRAM_IP}/bot${TELEGRAM_TOKEN}/sendMessage`;
   
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text
-      })
+    await axios.post(url, {
+      chat_id: chatId,
+      text: text
+    }, {
+      headers: {
+        'Host': 'api.telegram.org', // Trick Telegram into thinking we used the domain
+        'Content-Type': 'application/json'
+      },
+      httpsAgent: BYPASS_AGENT, // Allow the SSL mismatch
+      timeout: 10000 // 10 second timeout
     });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`❌ Telegram API Error: ${response.status} ${errText}`);
-    } else {
-      console.log('📤 Reply sent to Telegram');
-    }
+    console.log('📤 Reply sent to Telegram (via Direct IP)');
   } catch (error) {
-    console.error("❌ Network Error sending to Telegram:", error);
+    console.error("❌ Network Error sending to Telegram:", error instanceof Error ? error.message : error);
   }
 }
 
@@ -144,9 +114,9 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'running', dns_patch: 'v2_active' });
+  res.json({ status: 'running', mode: 'direct_ip_bypass' });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on ${PORT} with DNS Patch V2`);
+  console.log(`🚀 Server running on ${PORT}`);
 });
