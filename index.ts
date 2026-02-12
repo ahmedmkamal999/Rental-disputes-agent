@@ -50,8 +50,9 @@ app.post('/webhook', async (req, res) => {
     // 2. Ask the Agent (No network call needed, it's right here!)
     console.log(`💬 Processing message from chat ${chatId}:`, userText);
 
-    // Create a unique session ID for each chat
-    const sessionId = `telegram_${chatId}`;
+    // Create a unique session ID - using timestamp to avoid session conflicts
+    // This makes each message a fresh conversation (stateless)
+    const sessionId = `telegram_${chatId}_${Date.now()}`;
     const userId = `user_${chatId}`;
 
     // Run the agent and collect events
