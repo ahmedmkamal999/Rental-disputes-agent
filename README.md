@@ -1,3 +1,13 @@
+---
+title: Telegram Adk Bridge
+emoji: 🚀
+colorFrom: pink
+colorTo: yellow
+sdk: docker
+pinned: false
+license: mit
+---
+
 # Rental Disputes Agent
 
 A Google ADK-powered agent that performs preliminary validation of rental dispute cases to determine if they satisfy legislative legal requirements before entering the formal legal process.
