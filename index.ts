@@ -9,6 +9,20 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 7860; // Hugging Face requirement
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+// Validate required environment variables
+console.log('===== Environment Check =====');
+console.log('PORT:', PORT);
+console.log('TELEGRAM_TOKEN:', TELEGRAM_TOKEN ? '✓ Set' : '✗ Missing');
+console.log('GEMINI_API_KEY:', GEMINI_API_KEY ? '✓ Set' : '✗ Missing');
+
+if (!TELEGRAM_TOKEN) {
+  console.warn('⚠️  TELEGRAM_TOKEN not set - bot will not send replies');
+}
+if (!GEMINI_API_KEY) {
+  console.error('❌ GEMINI_API_KEY not set - agent will not work!');
+}
 
 // Create the runner to execute the agent
 const runner = new InMemoryRunner({
@@ -18,10 +32,14 @@ const runner = new InMemoryRunner({
 
 // 1. Webhook Endpoint (Telegram talks to this)
 app.post('/webhook', async (req, res) => {
+  console.log('📥 Received webhook request');
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+  
   const message = req.body.message;
 
   // Basic validation
   if (!message || !message.text) {
+    console.log('⚠️  No message or text found, skipping');
     return res.sendStatus(200);
   }
 
@@ -30,7 +48,7 @@ app.post('/webhook', async (req, res) => {
 
   try {
     // 2. Ask the Agent (No network call needed, it's right here!)
-    console.log("Asking agent:", userText);
+    console.log(`💬 Processing message from chat ${chatId}:`, userText);
 
     // Create a unique session ID for each chat
     const sessionId = `telegram_${chatId}`;
@@ -60,24 +78,32 @@ app.post('/webhook', async (req, res) => {
       replyText = "I processed that but have no text to show.";
     }
 
+    console.log(`✅ Generated reply (${replyText.length} chars):`, replyText.substring(0, 100) + '...');
+
     // 3. Send Reply to Telegram
     if (TELEGRAM_TOKEN) {
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         chat_id: chatId,
         text: replyText
       });
+      console.log('📤 Reply sent to Telegram');
     } else {
-      console.warn("TELEGRAM_TOKEN not set - skipping Telegram reply");
+      console.warn("⚠️  TELEGRAM_TOKEN not set - skipping Telegram reply");
     }
 
   } catch (error) {
-    console.error("Agent Error:", error);
+    console.error("❌ Agent Error:", error);
+    console.error("Error details:", error instanceof Error ? error.message : String(error));
     // Optional: Error message to user
     if (TELEGRAM_TOKEN) {
-      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-        chat_id: chatId,
-        text: "Sorry, I encountered an error processing your request."
-      });
+      try {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+          chat_id: chatId,
+          text: "Sorry, I encountered an error processing your request."
+        });
+      } catch (sendError) {
+        console.error("Failed to send error message:", sendError);
+      }
     }
   }
 
@@ -85,8 +111,25 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-app.get('/', (req, res) => res.send('Agent is running 24/7!'));
+app.get('/', (req, res) => {
+  const status = {
+    status: 'running',
+    telegramToken: TELEGRAM_TOKEN ? 'configured' : 'missing',
+    geminiApiKey: GEMINI_API_KEY ? 'configured' : 'missing',
+    webhookUrl: TELEGRAM_TOKEN ? `https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=YOUR_SPACE_URL/webhook` : 'N/A'
+  };
+  res.json(status);
+});
 
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log('\n===== Server Started =====');
+  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`📡 Webhook endpoint: http://localhost:${PORT}/webhook`);
+  console.log('========================\n');
+  
+  if (TELEGRAM_TOKEN && GEMINI_API_KEY) {
+    console.log('✅ Ready to receive Telegram messages!');
+  } else {
+    console.log('⚠️  Missing configuration - bot may not work properly');
+  }
 });

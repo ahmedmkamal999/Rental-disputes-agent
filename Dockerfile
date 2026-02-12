@@ -1,5 +1,5 @@
-# Use Node.js
-FROM node:18
+# Use Node.js 20 (required by @google/genai)
+FROM node:20
 
 # Create app directory
 WORKDIR /app
