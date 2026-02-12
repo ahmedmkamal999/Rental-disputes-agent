@@ -7,9 +7,19 @@ import axios from 'axios';
 const app = express();
 app.use(bodyParser.json());
 
-const PORT = process.env.PORT || 3000; // Render uses port 3000 by default usually
+const PORT = process.env.PORT || 3000;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+// Validate required environment variables
+if (!GEMINI_API_KEY) {
+  console.error('ERROR: GEMINI_API_KEY environment variable is required');
+  process.exit(1);
+}
+
+if (!TELEGRAM_TOKEN) {
+  console.error('WARNING: TELEGRAM_TOKEN not set - webhook will not work');
+}
 
 // Simple Agent runner
 const runner = new InMemoryRunner({
@@ -71,7 +81,14 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('Agent is running on Render!');
+  const status = {
+    status: 'running',
+    app: 'Rental Disputes Agent',
+    geminiConfigured: !!GEMINI_API_KEY,
+    telegramConfigured: !!TELEGRAM_TOKEN,
+    timestamp: new Date().toISOString()
+  };
+  res.json(status);
 });
 
 app.listen(PORT, () => {
