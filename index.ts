@@ -3,29 +3,15 @@ import bodyParser from 'body-parser';
 import { rootAgent } from './agent.js'; 
 import { InMemoryRunner, stringifyContent } from '@google/adk';
 import axios from 'axios';
-import https from 'https';
-
-// =================================================================
-// ☢️ NUCLEAR FIX V3: DIRECT IP + SSL BYPASS
-// We stop asking "Where is Telegram?" and just go to the door directly.
-// =================================================================
-const TELEGRAM_IP = '149.154.167.220'; // Official Telegram API IP
-const BYPASS_AGENT = new https.Agent({
-  rejectUnauthorized: false // Required because we are connecting to an IP, not a Domain
-});
-// =================================================================
 
 const app = express();
 app.use(bodyParser.json());
 
-const PORT = process.env.PORT || 7860;
+const PORT = process.env.PORT || 3000; // Render uses port 3000 by default usually
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-console.log('===== Environment Check =====');
-console.log('PORT:', PORT);
-console.log('TELEGRAM_TOKEN:', TELEGRAM_TOKEN ? '✓ Set' : '✗ Missing');
-
+// Simple Agent runner
 const runner = new InMemoryRunner({
   agent: rootAgent,
   appName: 'RentalDisputesBot'
@@ -34,42 +20,13 @@ const runner = new InMemoryRunner({
 async function ensureSession(userId: string, sessionId: string) {
   const session = await runner.sessionService.getSession({
     appName: 'RentalDisputesBot',
-    userId,
-    sessionId
+    userId, sessionId
   });
-
   if (!session) {
     await runner.sessionService.createSession({
       appName: 'RentalDisputesBot',
-      userId,
-      sessionId,
-      state: {}
+      userId, sessionId, state: {}
     });
-  }
-}
-
-// Helper function to send to Telegram using AXIOS + DIRECT IP
-async function sendToTelegram(chatId: number, text: string) {
-  if (!TELEGRAM_TOKEN) return;
-  
-  // We construct a URL using the IP ADDRESS, not the domain
-  const url = `https://${TELEGRAM_IP}/bot${TELEGRAM_TOKEN}/sendMessage`;
-  
-  try {
-    await axios.post(url, {
-      chat_id: chatId,
-      text: text
-    }, {
-      headers: {
-        'Host': 'api.telegram.org', // Trick Telegram into thinking we used the domain
-        'Content-Type': 'application/json'
-      },
-      httpsAgent: BYPASS_AGENT, // Allow the SSL mismatch
-      timeout: 10000 // 10 second timeout
-    });
-    console.log('📤 Reply sent to Telegram (via Direct IP)');
-  } catch (error) {
-    console.error("❌ Network Error sending to Telegram:", error instanceof Error ? error.message : error);
   }
 }
 
@@ -80,16 +37,13 @@ app.post('/webhook', async (req, res) => {
   const chatId = message.chat.id;
   const userText = message.text;
 
-  console.log(`💬 Processing: ${userText}`);
-
   try {
     const sessionId = `telegram_${chatId}`;
     const userId = `user_${chatId}`;
     await ensureSession(userId, sessionId);
 
     const events = runner.runAsync({
-      userId,
-      sessionId,
+      userId, sessionId,
       newMessage: { role: 'user', parts: [{ text: userText }] }
     });
 
@@ -101,22 +55,25 @@ app.post('/webhook', async (req, res) => {
 
     if (!replyText) replyText = "Thinking...";
 
-    console.log(`✅ Generated reply: ${replyText.substring(0, 50)}...`);
-    
-    await sendToTelegram(chatId, replyText);
+    // Clean, standard Axios call
+    if (TELEGRAM_TOKEN) {
+      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+        chat_id: chatId,
+        text: replyText
+      });
+    }
 
   } catch (error) {
-    console.error("❌ Agent Error:", error);
-    await sendToTelegram(chatId, "Sorry, I encountered an error. Please try again.");
+    console.error("Agent Error:", error);
   }
 
   res.sendStatus(200);
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'running', mode: 'direct_ip_bypass' });
+  res.send('Agent is running on Render!');
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
