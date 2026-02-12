@@ -1,13 +1,3 @@
----
-title: Telegram Adk Bridge
-emoji: 🚀
-colorFrom: pink
-colorTo: yellow
-sdk: docker
-pinned: false
-license: mit
----
-
 # Rental Disputes Agent
 
 A Google ADK-powered agent that performs preliminary validation of rental dispute cases to determine if they satisfy legislative legal requirements before entering the formal legal process.
@@ -57,42 +47,6 @@ Then open your browser to http://localhost:8000
 ```bash
 npm start
 ```
-
-## Deployment to Hugging Face Spaces
-
-### 1. Set Up Environment Variables
-
-In your Hugging Face Space settings, add these secrets:
-
-- **GEMINI_API_KEY**: Your Google Gemini API key ([Get one here](https://aistudio.google.com/app/apikey))
-- **TELEGRAM_TOKEN**: Your Telegram Bot token (get from [@BotFather](https://t.me/botfather))
-
-### 2. Configure Telegram Webhook
-
-Once your Space is running, set up the webhook by visiting this URL in your browser:
-
-```
-https://api.telegram.org/bot<YOUR_TELEGRAM_TOKEN>/setWebhook?url=<YOUR_SPACE_URL>/webhook
-```
-
-Replace:
-- `<YOUR_TELEGRAM_TOKEN>` with your actual bot token
-- `<YOUR_SPACE_URL>` with your Space URL (e.g., `https://ahmdmohamedd-telegram-adk-bridge.hf.space`)
-
-Example:
-```
-https://api.telegram.org/bot123456789:ABCdefGHIjklMNOpqrsTUVwxyz/setWebhook?url=https://ahmdmohamedd-telegram-adk-bridge.hf.space/webhook
-```
-
-You should see: `{"ok":true,"result":true,"description":"Webhook was set"}`
-
-### 3. Test Your Bot
-
-Send a message to your bot on Telegram. Check the Space logs to see if messages are being received and processed.
-
-### Troubleshooting
-
-Visit your Space URL root (e.g., `https://your-space.hf.space/`) to see configuration status and verify both API keys are set.
 
 ## How It Works
 
