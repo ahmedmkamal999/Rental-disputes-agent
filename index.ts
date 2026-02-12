@@ -3,6 +3,7 @@ import bodyParser from 'body-parser';
 import { rootAgent } from './agent.js'; // Your existing agent file
 import { InMemoryRunner, stringifyContent } from '@google/adk';
 import axios from 'axios';
+import https from 'https';
 
 const app = express();
 app.use(bodyParser.json());
@@ -10,6 +11,10 @@ app.use(bodyParser.json());
 const PORT = process.env.PORT || 7860; // Hugging Face requirement
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+const telegramAgent = new https.Agent({
+  family: 4
+});
 
 // Validate required environment variables
 console.log('===== Environment Check =====');
@@ -101,10 +106,16 @@ app.post('/webhook', async (req, res) => {
 
     // 3. Send Reply to Telegram
     if (TELEGRAM_TOKEN) {
-      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-        chat_id: chatId,
-        text: replyText
-      });
+      await axios.post(
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+        {
+          chat_id: chatId,
+          text: replyText
+        },
+        {
+          httpsAgent: telegramAgent
+        }
+      );
       console.log('📤 Reply sent to Telegram');
     } else {
       console.warn("⚠️  TELEGRAM_TOKEN not set - skipping Telegram reply");
@@ -131,6 +142,7 @@ app.post('/webhook', async (req, res) => {
             text: errorReplyText
           },
           {
+            httpsAgent: telegramAgent,
             timeout: 10000, // 10 second timeout
             headers: {
               'Content-Type': 'application/json'
