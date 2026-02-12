@@ -5,30 +5,41 @@ import { InMemoryRunner, stringifyContent } from '@google/adk';
 import dns from 'node:dns';
 
 // =================================================================
-// ☢️ NUCLEAR FIX: MANUAL DNS OVERRIDE
-// We explicitly tell Node: "If you see api.telegram.org, go to 149.154.167.220"
-// This bypasses the broken container DNS completely.
+// ☢️ NUCLEAR FIX V2: ADVANCED DNS OVERRIDE
+// Fixes 'ERR_INVALID_IP_ADDRESS' by handling 'all: true' lookup requests
 // =================================================================
 const originalLookup = dns.lookup.bind(dns);
-type DnsLookupCallback = (err: NodeJS.ErrnoException | null, address: string, family: number) => void;
 
-dns.lookup = ((hostname: string, options: unknown, callback?: unknown) => {
-  let resolvedOptions: dns.LookupOptions | undefined;
-  let resolvedCallback: DnsLookupCallback;
+dns.lookup = ((hostname: string, options: any, callback: any) => {
+  let resolvedCallback = callback;
+  let resolvedOptions = options;
 
+  // Handle optional arguments (options can be the callback)
   if (typeof options === 'function') {
-    resolvedCallback = options as DnsLookupCallback;
-  } else {
-    resolvedOptions = options as dns.LookupOptions | undefined;
-    resolvedCallback = callback as DnsLookupCallback;
+    resolvedCallback = options;
+    resolvedOptions = {};
   }
 
   if (hostname === 'api.telegram.org') {
-    // console.log('⚡ Using Hardcoded IP for Telegram');
-    return resolvedCallback(null, '149.154.167.220', 4); // Telegram's Public IP
+    // Telegram's Public IPv4
+    const ip = '149.154.167.220'; 
+
+    // CHECK: Does the requester want ALL addresses? (Node 'fetch' does this)
+    if (resolvedOptions && resolvedOptions.all) {
+      // Return an Array of objects
+      return process.nextTick(() => 
+        resolvedCallback(null, [{ address: ip, family: 4 }])
+      );
+    }
+    
+    // Otherwise, return simple arguments
+    return process.nextTick(() => 
+      resolvedCallback(null, ip, 4)
+    );
   }
 
-  return originalLookup(hostname, resolvedOptions ?? {}, resolvedCallback as any);
+  // For all other domains, behave normally
+  return originalLookup(hostname, resolvedOptions, resolvedCallback);
 }) as typeof dns.lookup;
 // =================================================================
 
@@ -69,8 +80,6 @@ async function ensureSession(userId: string, sessionId: string) {
 async function sendToTelegram(chatId: number, text: string) {
   if (!TELEGRAM_TOKEN) return;
   
-  // Note: We still use the domain name here. 
-  // Our custom dns.lookup above will silently swap it for the IP in the background.
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
   
   try {
@@ -135,9 +144,9 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'running', dns_patch: 'active' });
+  res.json({ status: 'running', dns_patch: 'v2_active' });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on ${PORT} with DNS Patch`);
+  console.log(`🚀 Server running on ${PORT} with DNS Patch V2`);
 });
