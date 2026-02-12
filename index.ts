@@ -1,6 +1,7 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import { rootAgent } from './agent.js'; // Your existing agent file
+import { InMemoryRunner, stringifyContent, isFinalResponse } from '@google/adk';
 import axios from 'axios';
 
 const app = express();
@@ -8,6 +9,12 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 7860; // Hugging Face requirement
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+
+// Create the runner to execute the agent
+const runner = new InMemoryRunner({
+  agent: rootAgent,
+  appName: 'RentalDisputesBot'
+});
 
 // 1. Webhook Endpoint (Telegram talks to this)
 app.post('/webhook', async (req, res) => {
@@ -25,11 +32,33 @@ app.post('/webhook', async (req, res) => {
     // 2. Ask the Agent (No network call needed, it's right here!)
     console.log("Asking agent:", userText);
 
-    // Google ADK LlmAgent uses generate() method
-    const response = await rootAgent.generate({
-      userMessage: userText,
+    // Create a unique session ID for each chat
+    const sessionId = `telegram_${chatId}`;
+    const userId = `user_${chatId}`;
+
+    // Run the agent and collect events
+    const events = runner.runAsync({
+      userId,
+      sessionId,
+      newMessage: {
+        role: 'user',
+        parts: [{ text: userText }]
+      }
     });
-    const replyText = typeof response === 'string' ? response : response.text || "I processed that but have no text to show.";
+
+    // Collect the agent's response from events
+    let replyText = '';
+    for await (const event of events) {
+      // Extract text from the event
+      const text = stringifyContent(event);
+      if (text) {
+        replyText += text;
+      }
+    }
+
+    if (!replyText) {
+      replyText = "I processed that but have no text to show.";
+    }
 
     // 3. Send Reply to Telegram
     if (TELEGRAM_TOKEN) {
