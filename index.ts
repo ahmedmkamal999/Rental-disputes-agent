@@ -2,13 +2,35 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import { rootAgent } from './agent.js'; 
 import { InMemoryRunner, stringifyContent } from '@google/adk';
-import dns from 'node:dns'; // <--- NEW IMPORT
+import dns from 'node:dns';
 
-// 1. THE NUCLEAR FIX: Force Node to prefer IPv4 globally
-// This fixes the "ENOTFOUND" error in 99% of containers
-if (dns.setDefaultResultOrder) {
-  dns.setDefaultResultOrder('ipv4first');
-}
+// =================================================================
+// ☢️ NUCLEAR FIX: MANUAL DNS OVERRIDE
+// We explicitly tell Node: "If you see api.telegram.org, go to 149.154.167.220"
+// This bypasses the broken container DNS completely.
+// =================================================================
+const originalLookup = dns.lookup.bind(dns);
+type DnsLookupCallback = (err: NodeJS.ErrnoException | null, address: string, family: number) => void;
+
+dns.lookup = ((hostname: string, options: unknown, callback?: unknown) => {
+  let resolvedOptions: dns.LookupOptions | undefined;
+  let resolvedCallback: DnsLookupCallback;
+
+  if (typeof options === 'function') {
+    resolvedCallback = options as DnsLookupCallback;
+  } else {
+    resolvedOptions = options as dns.LookupOptions | undefined;
+    resolvedCallback = callback as DnsLookupCallback;
+  }
+
+  if (hostname === 'api.telegram.org') {
+    // console.log('⚡ Using Hardcoded IP for Telegram');
+    return resolvedCallback(null, '149.154.167.220', 4); // Telegram's Public IP
+  }
+
+  return originalLookup(hostname, resolvedOptions ?? {}, resolvedCallback as any);
+}) as typeof dns.lookup;
+// =================================================================
 
 const app = express();
 app.use(bodyParser.json());
@@ -47,6 +69,8 @@ async function ensureSession(userId: string, sessionId: string) {
 async function sendToTelegram(chatId: number, text: string) {
   if (!TELEGRAM_TOKEN) return;
   
+  // Note: We still use the domain name here. 
+  // Our custom dns.lookup above will silently swap it for the IP in the background.
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
   
   try {
@@ -100,7 +124,6 @@ app.post('/webhook', async (req, res) => {
 
     console.log(`✅ Generated reply: ${replyText.substring(0, 50)}...`);
     
-    // Send using the new helper
     await sendToTelegram(chatId, replyText);
 
   } catch (error) {
@@ -112,9 +135,9 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'running', ipv4_forced: true });
+  res.json({ status: 'running', dns_patch: 'active' });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on ${PORT}`);
+  console.log(`🚀 Server running on ${PORT} with DNS Patch`);
 });
