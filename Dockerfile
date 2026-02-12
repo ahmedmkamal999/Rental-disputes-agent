@@ -7,11 +7,12 @@ WORKDIR /app
 # Install dependencies
 COPY package*.json ./
 RUN npm install
-# Install TypeScript runner so we can run .ts files directly
-RUN npm install -g ts-node typescript
 
 # Copy all your code
 COPY . .
 
-# Start the server (make sure your package.json script is "start": "ts-node index.ts")
+# Build TypeScript to JavaScript
+RUN npm run build
+
+# Start the server
 CMD ["npm", "start"]

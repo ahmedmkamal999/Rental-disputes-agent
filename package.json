@@ -6,7 +6,8 @@
   "main": "agent.ts",
   "scripts": {
     "dev": "npx adk web",
-    "start": "ts-node index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
     "cli": "npx adk run agent.ts"
   },
   "keywords": [
