@@ -94,15 +94,33 @@ app.post('/webhook', async (req, res) => {
   } catch (error) {
     console.error("❌ Agent Error:", error);
     console.error("Error details:", error instanceof Error ? error.message : String(error));
-    // Optional: Error message to user
+    
+    // Determine error message
+    let errorReplyText = "Sorry, I encountered an error processing your request. Please try again.";
+    if (error instanceof Error && error.message.includes('Session not found')) {
+      console.error("💡 Session error - this might be the first message. The session should be created now.");
+      errorReplyText = "I'm initializing our conversation. Please send your message again.";
+    }
+    
+    // Send error message to user
     if (TELEGRAM_TOKEN) {
       try {
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-          chat_id: chatId,
-          text: "Sorry, I encountered an error processing your request."
-        });
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+          {
+            chat_id: chatId,
+            text: errorReplyText
+          },
+          {
+            timeout: 10000, // 10 second timeout
+            headers: {
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+        console.log('📤 Error message sent to Telegram');
       } catch (sendError) {
-        console.error("Failed to send error message:", sendError);
+        console.error("Failed to send error message to Telegram:", sendError instanceof Error ? sendError.message : String(sendError));
       }
     }
   }
