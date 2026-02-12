@@ -1,7 +1,7 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import { rootAgent } from './agent.js'; // Your existing agent file
-import { InMemoryRunner, stringifyContent, isFinalResponse } from '@google/adk';
+import { InMemoryRunner, stringifyContent } from '@google/adk';
 import axios from 'axios';
 
 const app = express();
@@ -30,6 +30,23 @@ const runner = new InMemoryRunner({
   appName: 'RentalDisputesBot'
 });
 
+async function ensureSession(userId: string, sessionId: string) {
+  const session = await runner.sessionService.getSession({
+    appName: 'RentalDisputesBot',
+    userId,
+    sessionId
+  });
+
+  if (!session) {
+    await runner.sessionService.createSession({
+      appName: 'RentalDisputesBot',
+      userId,
+      sessionId,
+      state: {}
+    });
+  }
+}
+
 // 1. Webhook Endpoint (Telegram talks to this)
 app.post('/webhook', async (req, res) => {
   console.log('📥 Received webhook request');
@@ -50,10 +67,11 @@ app.post('/webhook', async (req, res) => {
     // 2. Ask the Agent (No network call needed, it's right here!)
     console.log(`💬 Processing message from chat ${chatId}:`, userText);
 
-    // Create a unique session ID - using timestamp to avoid session conflicts
-    // This makes each message a fresh conversation (stateless)
-    const sessionId = `telegram_${chatId}_${Date.now()}`;
+    // Create a stable session ID per chat to keep conversation state
+    const sessionId = `telegram_${chatId}`;
     const userId = `user_${chatId}`;
+
+    await ensureSession(userId, sessionId);
 
     // Run the agent and collect events
     const events = runner.runAsync({
