@@ -15,7 +15,7 @@ import { LAW_REFERENCE_EN, LAW_REFERENCE_AR, CLARIFY_QUESTIONS_EN, CLARIFY_QUEST
  */
 export const rootAgent = new LlmAgent({
   name: 'RentalDisputesValidationAgent',
-  model: 'gemini-2.5-flash',
+  model: 'gemini-3-flash-preview',
   description: 'Conversational agent for preliminary validation of rental dispute cases',
   tools: [uploadDocumentTool, extractDocumentTextTool, confirmExtractedDataTool],
   instruction: `You are an intelligent rental disputes validation assistant. You help users determine if their rental dispute case satisfies legislative legal requirements.
