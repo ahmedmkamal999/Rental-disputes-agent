@@ -3,16 +3,18 @@ import bodyParser from 'body-parser';
 import { rootAgent } from './agent.js'; 
 import { InMemoryRunner, stringifyContent } from '@google/adk';
 import axios from 'axios';
+import pdfParse from 'pdf-parse';
+import Tesseract from 'tesseract.js';
 
-const router = express.Router();
 const app = express();
 app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 8080;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 
-const SESSION_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
-const sessionTimestamps = new Map<string, number>(); // Track session activity
+// 1. Session Management
+const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const sessionTimestamps = new Map<string, number>();
 
 const runner = new InMemoryRunner({
   agent: rootAgent,
@@ -20,59 +22,83 @@ const runner = new InMemoryRunner({
 });
 
 async function ensureSession(userId: string, sessionId: string) {
-  // Check if session has timed out
+  // Clear old sessions
   const lastActivity = sessionTimestamps.get(sessionId);
   if (lastActivity && Date.now() - lastActivity > SESSION_TIMEOUT_MS) {
-    console.log(`⏱️  Session ${sessionId} timed out. Clearing...`);
-    // Delete the old session
-    await runner.sessionService.deleteSession({
-      appName: 'RentalDisputesBot',
-      userId, sessionId
-    }).catch(() => {}); // Ignore errors if session doesn't exist
+    console.log(`⏱️ Session ${sessionId} timed out. Clearing context...`);
+    await runner.sessionService.deleteSession({ appName: 'RentalDisputesBot', userId, sessionId }).catch(() => {});
     sessionTimestamps.delete(sessionId);
   }
-
-  // Update last activity timestamp
   sessionTimestamps.set(sessionId, Date.now());
 
-  const session = await runner.sessionService.getSession({
-    appName: 'RentalDisputesBot',
-    userId, sessionId
-  });
+  const session = await runner.sessionService.getSession({ appName: 'RentalDisputesBot', userId, sessionId });
   if (!session) {
-    await runner.sessionService.createSession({
-      appName: 'RentalDisputesBot',
-      userId, sessionId, state: {}
-    });
-    console.log(`✨ New session created: ${sessionId}`);
+    await runner.sessionService.createSession({ appName: 'RentalDisputesBot', userId, sessionId, state: {} });
   }
 }
 
+// 2. The Fixed Download Function
 async function downloadFile(fileId: string) {
   if (!TELEGRAM_TOKEN) throw new Error("No Token");
   
+  // Get path
   const fileInfo = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`);
   const filePath = fileInfo.data.result.file_path;
   const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
   
+  // Download binary
   const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
   
-  // Determine MIME type - use provided header or infer from file extension
-  let mimeType = response.headers['content-type'] || 'application/octet-stream';
-  if (!mimeType && filePath.endsWith('.pdf')) {
-    mimeType = 'application/pdf';
+  // ⚡ CRITICAL FIX: FORCE MIME TYPES ⚡
+  // Telegram often sends "application/octet-stream" which Gemini REJECTS.
+  // We manually force the correct type based on the extension.
+  let mimeType = response.headers['content-type'];
+  const lowerPath = filePath.toLowerCase();
+
+  if (lowerPath.endsWith('.pdf')) {
+    mimeType = 'application/pdf'; // Force PDF
+    console.log("📄 Forced MIME type to application/pdf");
+  } else if (lowerPath.endsWith('.jpg') || lowerPath.endsWith('.jpeg')) {
+    mimeType = 'image/jpeg';
+  } else if (lowerPath.endsWith('.png')) {
+    mimeType = 'image/png';
   }
-  
-  const base64Data = Buffer.from(response.data).toString('base64');
-  
-  console.log(`📄 File downloaded - MIME Type: ${mimeType}, Size: ${response.data.length} bytes`);
+
+  console.log(`⬇️ Downloaded: ${filePath} | Size: ${response.data.length} | Type: ${mimeType}`);
 
   return {
     inlineData: {
-      data: base64Data,
+      data: Buffer.from(response.data).toString('base64'),
       mimeType: mimeType
     }
   };
+}
+
+async function extractTextFromPdf(buffer: Buffer) {
+  const result = await pdfParse(buffer);
+  return result.text || '';
+}
+
+async function extractTextFromImage(buffer: Buffer) {
+  const result = await Tesseract.recognize(buffer, 'eng+ara', { logger: () => {} });
+  return result.data.text || '';
+}
+
+async function downloadFileBuffer(fileId: string) {
+  if (!TELEGRAM_TOKEN) throw new Error("No Token");
+
+  const fileInfo = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`);
+  const filePath = fileInfo.data.result.file_path;
+  const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
+  const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+
+  const lowerPath = filePath.toLowerCase();
+  let mimeType = response.headers['content-type'];
+  if (lowerPath.endsWith('.pdf')) mimeType = 'application/pdf';
+  if (lowerPath.endsWith('.jpg') || lowerPath.endsWith('.jpeg')) mimeType = 'image/jpeg';
+  if (lowerPath.endsWith('.png')) mimeType = 'image/png';
+
+  return { buffer: Buffer.from(response.data), mimeType, filePath };
 }
 
 app.post('/webhook', async (req, res) => {
@@ -85,131 +111,95 @@ app.post('/webhook', async (req, res) => {
   const userId = `user_${chatId}`;
 
   try {
-    // --- HANDLE SPECIAL COMMANDS ---
+    // --- COMMANDS ---
     if (userText === '/reset' || userText === '/start') {
-      console.log(`🔄 Reset command received from ${chatId}`);
-      
-      // Delete session and clear timeout
-      await runner.sessionService.deleteSession({
-        appName: 'RentalDisputesBot',
-        userId, sessionId
-      }).catch(() => {});
-      
-      sessionTimestamps.delete(sessionId);
-      
-      if (TELEGRAM_TOKEN) {
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-          chat_id: chatId,
-          text: "✅ Session cleared! You can now start fresh.\n\nType a message to begin the rental dispute validation process."
-        });
-      }
-      return res.sendStatus(200);
+       await runner.sessionService.deleteSession({ appName: 'RentalDisputesBot', userId, sessionId }).catch(() => {});
+       sessionTimestamps.delete(sessionId);
+       if (TELEGRAM_TOKEN) {
+         await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+           chat_id: chatId, text: "✅ System Ready. Please upload your Rental Contract (PDF or Image)."
+         });
+       }
+       return res.sendStatus(200);
     }
 
-    // --- 1. HANDLE FILES ---
+    // --- GATHER PARTS ---
     const messageParts: any[] = [];
     let hasFile = false;
+    let extractedText = '';
+    let detectedMime: string | undefined;
+
     if (message.photo) {
-      console.log("📸 Photo detected");
       const photo = message.photo[message.photo.length - 1]; 
-      messageParts.push(await downloadFile(photo.file_id));
+      const { buffer, mimeType } = await downloadFileBuffer(photo.file_id);
+      detectedMime = mimeType;
+      extractedText = await extractTextFromImage(buffer);
       hasFile = true;
     } 
-    else if (message.voice || message.audio) {
-      console.log("mic Audio detected");
-      const fileId = message.voice ? message.voice.file_id : message.audio.file_id;
-      messageParts.push(await downloadFile(fileId));
-      hasFile = true;
-    }
     else if (message.document) {
-      console.log("pcl Document detected:", message.document.mime_type);
-      if (message.document.mime_type === 'application/pdf' || message.document.mime_type.startsWith('image/')) {
-        messageParts.push(await downloadFile(message.document.file_id));
+      // Accept PDFs and Images
+      const mime = message.document.mime_type || "";
+      if (mime.includes('pdf') || mime.includes('image') || message.document.file_name?.toLowerCase().endsWith('.pdf')) {
+        const { buffer, mimeType } = await downloadFileBuffer(message.document.file_id);
+        detectedMime = mimeType;
+        if (mimeType === 'application/pdf') {
+          extractedText = await extractTextFromPdf(buffer);
+        } else {
+          extractedText = await extractTextFromImage(buffer);
+        }
         hasFile = true;
       }
     }
 
-    // --- 2. INJECT SIMPLE REQUEST ---
+    // --- INJECT PROMPT ---
     if (hasFile) {
-      // If user sent file with NO text, give it a simple label
-      if (!userText) userText = "Please analyze this document.";
+      if (!userText) userText = "Analyze this document.";
+      const trimmedText = extractedText.trim();
+      const textSnippet = trimmedText ? trimmedText.slice(0, 8000) : '';
 
-      // Simple, non-aggressive prompt
-      const systemInjection = `
-
-Please extract the following information from this document:
-- Landlord name
-- Tenant name  
-- Property address
-- Rental amount
-- Contract start and end dates
-- Any other relevant information
-
-Provide a clear summary of what this document contains.`;
-      
-      userText += systemInjection;
-      console.log("📄 Injected simple document analysis request");
+      userText += `\n\n[DOCUMENT TEXT EXTRACTED LOCALLY]\n`;
+      userText += `Mime: ${detectedMime || 'unknown'}\n`;
+      userText += `Text:\n${textSnippet}`;
+      userText += `\n\nPlease extract: landlord name, tenant name, property address, rent amount, and contract dates.`;
     }
 
-    if (userText) {
-      messageParts.push({ text: userText });
-    }
-
+    if (userText) messageParts.push({ text: userText });
     if (messageParts.length === 0) return res.sendStatus(200);
 
-    // --- 3. RUN AGENT ---
+    // --- EXECUTE ---
     await ensureSession(userId, sessionId);
+    console.log(`🚀 Processing message for ${chatId}...`);
 
-    console.log(`💬 Processing message from ${chatId}`);
+    const events = runner.runAsync({
+      userId, sessionId,
+      newMessage: { role: 'user', parts: messageParts }
+    });
 
     let replyText = '';
-
-    try {
-      const events = runner.runAsync({
-        userId, sessionId,
-        newMessage: { role: 'user', parts: messageParts }
-      });
-
-      for await (const event of events) {
-        const text = stringifyContent(event);
-        if (text) replyText += text;
-      }
-    } catch (error) {
-      console.error(`❌ Error processing message:`, error);
+    for await (const event of events) {
+      const text = stringifyContent(event);
+      if (text) replyText += text;
     }
 
-    // --- 4. FALLBACK IF BLOCKED ---
+    // --- FINAL CHECK ---
     if (!replyText) {
-      console.log("❌ Model returned empty response (Likely Safety Block).");
-      console.log("📋 DEBUG INFO: File type was detected, but Gemini refused to process.");
-      replyText = "I received the file, but my safety filters blocked the response. \n\n**Tip:** Try sending a screenshot of the first page instead of the PDF. Sometimes that bypasses the filter.";
-    } else {
-      console.log("✅ Response successfully generated and sent to user");
+      console.log("❌ Gemini Blocked Response.");
+      replyText = "⚠️ **Security Filter Triggered**\n\nThe AI refused to read this file. This usually happens with Rental Contracts containing private data.\n\n**Solution:** Please send a **Screenshot (Image)** of the first page instead of the PDF file.";
     }
 
     if (TELEGRAM_TOKEN) {
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         chat_id: chatId,
         text: replyText,
-        parse_mode: "Markdown" // Better formatting
+        parse_mode: "Markdown"
       });
     }
 
   } catch (error) {
-    console.error("❌ Critical Error:", error);
-    if (TELEGRAM_TOKEN) {
-      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-        chat_id: chatId,
-        text: "Technical error processing the file. Please try sending a clear image instead."
-      });
-    }
+    console.error("❌ Crash:", error);
   }
 
   res.sendStatus(200);
-});
-
-app.get('/', (req, res) => {
-  res.send('Bot is running v4 (Safety Bypass)');
 });
 
 app.listen(PORT, () => {
