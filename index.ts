@@ -190,8 +190,8 @@ app.post('/webhook', async (req, res) => {
     if (TELEGRAM_TOKEN) {
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         chat_id: chatId,
-        text: replyText,
-        parse_mode: "Markdown"
+        text: replyText
+        // Removed parse_mode to send plain text - avoids entity parsing errors
       });
     }
 
