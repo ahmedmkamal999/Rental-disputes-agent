@@ -4,7 +4,6 @@ import { rootAgent } from './agent.js';
 import { InMemoryRunner, stringifyContent } from '@google/adk';
 import axios from 'axios';
 import pdfParse from 'pdf-parse';
-import Tesseract from 'tesseract.js';
 
 const app = express();
 app.use(bodyParser.json());
@@ -37,51 +36,9 @@ async function ensureSession(userId: string, sessionId: string) {
   }
 }
 
-// 2. The Fixed Download Function
-async function downloadFile(fileId: string) {
-  if (!TELEGRAM_TOKEN) throw new Error("No Token");
-  
-  // Get path
-  const fileInfo = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`);
-  const filePath = fileInfo.data.result.file_path;
-  const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
-  
-  // Download binary
-  const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
-  
-  // ⚡ CRITICAL FIX: FORCE MIME TYPES ⚡
-  // Telegram often sends "application/octet-stream" which Gemini REJECTS.
-  // We manually force the correct type based on the extension.
-  let mimeType = response.headers['content-type'];
-  const lowerPath = filePath.toLowerCase();
-
-  if (lowerPath.endsWith('.pdf')) {
-    mimeType = 'application/pdf'; // Force PDF
-    console.log("📄 Forced MIME type to application/pdf");
-  } else if (lowerPath.endsWith('.jpg') || lowerPath.endsWith('.jpeg')) {
-    mimeType = 'image/jpeg';
-  } else if (lowerPath.endsWith('.png')) {
-    mimeType = 'image/png';
-  }
-
-  console.log(`⬇️ Downloaded: ${filePath} | Size: ${response.data.length} | Type: ${mimeType}`);
-
-  return {
-    inlineData: {
-      data: Buffer.from(response.data).toString('base64'),
-      mimeType: mimeType
-    }
-  };
-}
-
 async function extractTextFromPdf(buffer: Buffer) {
   const result = await pdfParse(buffer);
   return result.text || '';
-}
-
-async function extractTextFromImage(buffer: Buffer) {
-  const result = await Tesseract.recognize(buffer, 'eng+ara', { logger: () => {} });
-  return result.data.text || '';
 }
 
 async function downloadFileBuffer(fileId: string) {
@@ -133,7 +90,7 @@ app.post('/webhook', async (req, res) => {
       const photo = message.photo[message.photo.length - 1]; 
       const { buffer, mimeType } = await downloadFileBuffer(photo.file_id);
       detectedMime = mimeType;
-      extractedText = await extractTextFromImage(buffer);
+      extractedText = '';
       hasFile = true;
     } 
     else if (message.document) {
@@ -145,7 +102,7 @@ app.post('/webhook', async (req, res) => {
         if (mimeType === 'application/pdf') {
           extractedText = await extractTextFromPdf(buffer);
         } else {
-          extractedText = await extractTextFromImage(buffer);
+          extractedText = '';
         }
         hasFile = true;
       }
@@ -166,9 +123,17 @@ app.post('/webhook', async (req, res) => {
     if (userText) messageParts.push({ text: userText });
     if (messageParts.length === 0) return res.sendStatus(200);
 
-    // --- EXECUTE ---
+    // --- EXECUTE WITH STREAMING ---
     await ensureSession(userId, sessionId);
     console.log(`🚀 Processing message for ${chatId}...`);
+
+    // Send typing indicator immediately
+    if (TELEGRAM_TOKEN) {
+      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendChatAction`, {
+        chat_id: chatId,
+        action: 'typing'
+      }).catch(() => {});
+    }
 
     const events = runner.runAsync({
       userId, sessionId,
@@ -176,22 +141,58 @@ app.post('/webhook', async (req, res) => {
     });
 
     let replyText = '';
+    let lastSentLength = 0;
+    let messageId: number | null = null;
+
     for await (const event of events) {
       const text = stringifyContent(event);
       if (text) replyText += text;
+
+      // Stream response: send/update message every 150 chars or on final response
+      if (replyText.length - lastSentLength > 150 || replyText.length > 3000) {
+        if (TELEGRAM_TOKEN) {
+          try {
+            if (!messageId) {
+              // First message
+              const resp = await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+                chat_id: chatId,
+                text: replyText || '⏳ Processing...'
+              });
+              messageId = resp.data.result.message_id;
+            } else {
+              // Edit existing message
+              await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/editMessageText`, {
+                chat_id: chatId,
+                message_id: messageId,
+                text: replyText
+              }).catch(() => {}); // Ignore edit errors (too frequent)
+            }
+            lastSentLength = replyText.length;
+          } catch (e) {
+            console.log("Stream update failed (non-critical):", (e as any).message);
+          }
+        }
+      }
     }
 
-    // --- FINAL CHECK ---
+    // --- FINAL RESPONSE ---
     if (!replyText) {
       console.log("❌ Gemini Blocked Response.");
-      replyText = "⚠️ **Security Filter Triggered**\n\nThe AI refused to read this file. This usually happens with Rental Contracts containing private data.\n\n**Solution:** Please send a **Screenshot (Image)** of the first page instead of the PDF file.";
+      replyText = "⚠️ Security Filter Triggered\n\nThe AI refused to read this file. This usually happens with Rental Contracts containing private data.\n\nSolution: Please send a Screenshot (Image) of the first page instead of the PDF file.";
     }
 
-    if (TELEGRAM_TOKEN) {
+    if (TELEGRAM_TOKEN && messageId) {
+      // Update final message
+      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/editMessageText`, {
+        chat_id: chatId,
+        message_id: messageId,
+        text: replyText
+      }).catch(() => {});
+    } else if (TELEGRAM_TOKEN && !messageId) {
+      // Send final if no streaming happened
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         chat_id: chatId,
         text: replyText
-        // Removed parse_mode to send plain text - avoids entity parsing errors
       });
     }
 
