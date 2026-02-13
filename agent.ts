@@ -72,10 +72,8 @@ This tool is an automated preliminary validation system and is advisory and non-
 
 Important Notice:
 • This system does NOT provide legal opinions or advice
-• It does NOT predict court outcomes or legal proceedings  
 • Results are for informational purposes only
 • This is NOT a substitute for professional legal consultation
-• Always consult with a qualified legal professional before taking any legal action
 
 By continuing, you acknowledge that you understand these limitations.
 
@@ -100,10 +98,8 @@ For Arabic:
 
 إشعار هام:
 • هذا النظام لا يقدم آراء أو نصائح قانونية
-• لا يتنبأ بنتائج المحكمة أو الإجراءات القانونية
 • النتائج لأغراض إعلامية فقط
 • هذا ليس بديلاً عن الاستشارة القانونية المهنية
-• استشر دائماً محاميً مؤهلاً قبل اتخاذ أي إجراء قانوني
 
 بالمتابعة، فإنك تقر بفهمك لهذه القيود.
 
@@ -274,60 +270,14 @@ Stage 8: Closing
 Display final disclaimer and thank user (in their language).
 
 English:
-"---
 
-⚖️ FINAL DISCLAIMER
-
-The validation result provided above is based on automated document analysis and rule-based assessment.
-
-Please Note:
-• This is NOT a legal opinion and should not be relied upon as such
-• Court outcomes may differ from this preliminary assessment
-• Legal requirements may vary based on jurisdiction and specific circumstances
-• You should consult with a qualified legal professional before proceeding with any legal action
-• The developers and operators of this system assume no liability for any decisions made based on this assessment
-
-For Official Legal Advice: Contact a licensed attorney or legal aid service in your jurisdiction.
-
----
-
-Thank You
-
-Thank you for using the Rental Disputes Validation System.
-
-Next Steps:
-- If complete: Proceed with filing through appropriate legal channels
-- If incomplete: Consider gathering missing requirements
-- Always consult a licensed attorney for official legal advice
+"Thank you for using the Rental Disputes Validation System.
 
 Session ended. Goodbye!"
 
 Arabic:
-"---
-
-⚖️ إخلاء مسؤولية نهائي
-
-نتيجة التحقق المقدمة أعلاه مبنية على تحليل آلي للوثائق وتقييم قائم على القواعد.
-
-يرجى ملاحظة:
-• هذا ليس رأياً قانونياً ولا ينبغي الاعتماد عليه على هذا النحو
-• قد تختلف نتائج المحكمة عن هذا التقييم الأولي
-• قد تختلف المتطلبات القانونية حسب الاختصاص القضائي والظروف المحددة
-• يجب عليك استشارة محامٍ مؤهل قدماً في أي إجراء قانوني
-• لا يتحمل مطورو ومشغلو هذا النظام أي مسؤولية عن أي قرارات تتخذ بناءً على هذا التقييم
-
-للحصول على مشورة قانونية رسمية: اتصل بمحامٍ مرخص أو خدمة المساعدة القانونية في نطاق اختصاصك القضائي.
-
----
-
-شكراً لك
-
+"
 شكراً لاستخدامك نظام التحقق من نزاعات الإيجار.
-
-الخطوات التالية:
-- إذا كانت مكتملة: المضي قدماً في التقديم من خلال القنوات القانونية المناسبة
-- إذا كانت غير مكتملة: فكر في جمع المتطلبات المفقودة
-- استشر دائماً محامياً مرخصاً للحصول على استشارة قانونية رسمية
 
 انتهت الجلسة. وداعاً!"
 
