@@ -4,11 +4,15 @@ import { rootAgent } from './agent.js';
 import { InMemoryRunner, stringifyContent } from '@google/adk';
 import axios from 'axios';
 
+const router = express.Router();
 const app = express();
 app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 8080;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+
+const SESSION_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
+const sessionTimestamps = new Map<string, number>(); // Track session activity
 
 const runner = new InMemoryRunner({
   agent: rootAgent,
@@ -16,6 +20,21 @@ const runner = new InMemoryRunner({
 });
 
 async function ensureSession(userId: string, sessionId: string) {
+  // Check if session has timed out
+  const lastActivity = sessionTimestamps.get(sessionId);
+  if (lastActivity && Date.now() - lastActivity > SESSION_TIMEOUT_MS) {
+    console.log(`⏱️  Session ${sessionId} timed out. Clearing...`);
+    // Delete the old session
+    await runner.sessionService.deleteSession({
+      appName: 'RentalDisputesBot',
+      userId, sessionId
+    }).catch(() => {}); // Ignore errors if session doesn't exist
+    sessionTimestamps.delete(sessionId);
+  }
+
+  // Update last activity timestamp
+  sessionTimestamps.set(sessionId, Date.now());
+
   const session = await runner.sessionService.getSession({
     appName: 'RentalDisputesBot',
     userId, sessionId
@@ -25,6 +44,7 @@ async function ensureSession(userId: string, sessionId: string) {
       appName: 'RentalDisputesBot',
       userId, sessionId, state: {}
     });
+    console.log(`✨ New session created: ${sessionId}`);
   }
 }
 
@@ -60,14 +80,35 @@ app.post('/webhook', async (req, res) => {
   if (!message) return res.sendStatus(200);
 
   const chatId = message.chat.id;
-  // Grab text (or caption). If empty, we will inject a default later.
   let userText = message.text || message.caption || "";
-  
-  const messageParts: any[] = [];
-  let hasFile = false;
+  const sessionId = `telegram_${chatId}`;
+  const userId = `user_${chatId}`;
 
   try {
+    // --- HANDLE SPECIAL COMMANDS ---
+    if (userText === '/reset' || userText === '/start') {
+      console.log(`🔄 Reset command received from ${chatId}`);
+      
+      // Delete session and clear timeout
+      await runner.sessionService.deleteSession({
+        appName: 'RentalDisputesBot',
+        userId, sessionId
+      }).catch(() => {});
+      
+      sessionTimestamps.delete(sessionId);
+      
+      if (TELEGRAM_TOKEN) {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+          chat_id: chatId,
+          text: "✅ Session cleared! You can now start fresh.\n\nType a message to begin the rental dispute validation process."
+        });
+      }
+      return res.sendStatus(200);
+    }
+
     // --- 1. HANDLE FILES ---
+    const messageParts: any[] = [];
+    let hasFile = false;
     if (message.photo) {
       console.log("📸 Photo detected");
       const photo = message.photo[message.photo.length - 1]; 
@@ -120,66 +161,30 @@ Your response MUST be substantive and complete.`;
 
     if (messageParts.length === 0) return res.sendStatus(200);
 
-    // --- 3. RUN AGENT WITH RETRY LOGIC ---
-    const sessionId = `telegram_${chatId}`;
-    const userId = `user_${chatId}`;
+    // --- 3. RUN AGENT ---
     await ensureSession(userId, sessionId);
 
     console.log(`💬 Processing message from ${chatId}`);
 
     let replyText = '';
-    let retryCount = 0;
-    const maxRetries = 2;
-    let lastMessageParts = messageParts;
 
-    while (retryCount <= maxRetries && !replyText) {
-      console.log(`📊 Attempt ${retryCount + 1}/${maxRetries + 1}`);
+    try {
+      const events = runner.runAsync({
+        userId, sessionId,
+        newMessage: { role: 'user', parts: messageParts }
+      });
 
-      try {
-        const events = runner.runAsync({
-          userId, sessionId,
-          newMessage: { role: 'user', parts: lastMessageParts }
-        });
-
-        for await (const event of events) {
-          const text = stringifyContent(event);
-          if (text) replyText += text;
-        }
-
-        if (replyText) {
-          console.log("✅ Successfully received response");
-          break;
-        }
-
-        // If no response, try retry with alternative prompt
-        if (retryCount < maxRetries) {
-          console.log("⚠️  Empty response, retrying with alternative prompt...");
-          retryCount++;
-
-          // Create alternative message parts with different framing
-          const altMessageParts = [...messageParts];
-          const textPart = altMessageParts.find(p => p.text);
-          
-          if (textPart) {
-            const altPrompts = [
-              "\n\n[RETRY ATTEMPT: Simple data extraction - list all specific facts found in this document]",
-              "\n\n[DIRECT REQUEST: What information about parties, dates, and amounts does this document contain?]",
-              "\n\n[INFORMATIONAL: Summarize the key details from this document without interpretation]"
-            ];
-            
-            textPart.text += altPrompts[retryCount - 1] || altPrompts[0];
-            console.log(`🔄 Retry ${retryCount}: Using alternative prompt strategy`);
-          }
-        }
-      } catch (error) {
-        console.error(`❌ Error on attempt ${retryCount + 1}:`, error);
-        retryCount++;
+      for await (const event of events) {
+        const text = stringifyContent(event);
+        if (text) replyText += text;
       }
+    } catch (error) {
+      console.error(`❌ Error processing message:`, error);
     }
 
     // --- 4. FALLBACK IF BLOCKED ---
     if (!replyText) {
-      console.log("❌ Model returned empty response after all retries (Likely Safety Block).");
+      console.log("❌ Model returned empty response (Likely Safety Block).");
       console.log("📋 DEBUG INFO: File type was detected, but Gemini refused to process.");
       replyText = "I received the file, but my safety filters blocked the response. \n\n**Tip:** Try sending a screenshot of the first page instead of the PDF. Sometimes that bypasses the filter.";
     } else {
