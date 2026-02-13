@@ -33,16 +33,12 @@ async function ensureSession(userId: string, sessionId: string) {
 async function downloadFile(fileId: string) {
   if (!TELEGRAM_TOKEN) throw new Error("No Token");
   
-  // 1. Get file path from Telegram
   const fileInfo = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`);
   const filePath = fileInfo.data.result.file_path;
-
-  // 2. Download the binary data
   const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
+  
   const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
 
-  // 3. Return as Base64 with MimeType
-  // Telegram voice notes are usually OGG/Opus, which Gemini supports
   return {
     inlineData: {
       data: Buffer.from(response.data).toString('base64'),
@@ -58,61 +54,48 @@ app.post('/webhook', async (req, res) => {
   const chatId = message.chat.id;
   const userText = message.text || message.caption || "";
   
-  // Prepare message parts
   const messageParts: any[] = [];
   
-  if (userText) {
-    messageParts.push({ text: userText });
-  }
-
   try {
-    // --- 1. HANDLE PHOTOS ---
+    // --- 1. HANDLE FILES ---
+    let hasFile = false;
+
+    // Photos
     if (message.photo) {
       console.log("📸 Photo detected");
-      const photo = message.photo[message.photo.length - 1]; // Best quality
-      const imagePart = await downloadFile(photo.file_id);
-      messageParts.push(imagePart);
+      const photo = message.photo[message.photo.length - 1]; 
+      messageParts.push(await downloadFile(photo.file_id));
+      hasFile = true;
     } 
-    
-    // --- 2. HANDLE VOICE NOTES ---
-    else if (message.voice) {
-      console.log("mic Voice Note detected");
-      const voicePart = await downloadFile(message.voice.file_id);
-      messageParts.push(voicePart);
-      // If no text was sent with the voice, add a prompt so the AI knows what to do
-      if (!userText) {
-        messageParts.push({ text: "Please listen to this audio and respond." });
-      }
+    // Voice/Audio
+    else if (message.voice || message.audio) {
+      console.log("mic Audio detected");
+      const fileId = message.voice ? message.voice.file_id : message.audio.file_id;
+      messageParts.push(await downloadFile(fileId));
+      hasFile = true;
     }
-
-    // --- 3. HANDLE AUDIO FILES (MP3/Music) ---
-    else if (message.audio) {
-      console.log("🎵 Audio File detected");
-      const audioPart = await downloadFile(message.audio.file_id);
-      messageParts.push(audioPart);
-    }
-
-    // --- 4. HANDLE DOCUMENTS (PDFs) ---
+    // Documents (PDFs)
     else if (message.document) {
       console.log("📄 Document detected:", message.document.mime_type);
       if (message.document.mime_type === 'application/pdf' || message.document.mime_type.startsWith('image/')) {
-        const docPart = await downloadFile(message.document.file_id);
-        messageParts.push(docPart);
-      } else {
-        if (TELEGRAM_TOKEN) {
-          await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Unsupported file type. I can currently only read Images, PDFs, and Audio."
-          });
-        }
-        return res.sendStatus(200);
+        messageParts.push(await downloadFile(message.document.file_id));
+        hasFile = true;
       }
     }
 
-    // If empty message, stop
+    // --- 2. ADD TEXT (OR FORCE PROMPT) ---
+    if (userText) {
+      messageParts.push({ text: userText });
+    } else if (hasFile) {
+      // ⚡ FIX: If user sent a file but NO text, force the AI to look at it.
+      console.log("⚡ Injecting hidden prompt for file analysis...");
+      messageParts.push({ text: "I have uploaded a file. Please analyze it and summarize the key relevant details for our rental dispute case." });
+    }
+
+    // If still empty (no file, no text), ignore
     if (messageParts.length === 0) return res.sendStatus(200);
 
-    // Run Agent
+    // --- 3. RUN AGENT ---
     const sessionId = `telegram_${chatId}`;
     const userId = `user_${chatId}`;
     await ensureSession(userId, sessionId);
@@ -121,20 +104,28 @@ app.post('/webhook', async (req, res) => {
 
     const events = runner.runAsync({
       userId, sessionId,
-      newMessage: { 
-        role: 'user', 
-        parts: messageParts 
-      }
+      newMessage: { role: 'user', parts: messageParts }
     });
 
     let replyText = '';
+    
+    // Improved Event Loop to catch all text types
     for await (const event of events) {
       const text = stringifyContent(event);
-      if (text) replyText += text;
+      if (text) {
+        replyText += text;
+      } else {
+        // Log non-text events for debugging (check Cloud Run logs if this happens)
+        console.log("Non-text event received:", JSON.stringify(event));
+      }
     }
 
-    if (!replyText) replyText = "I processed your input but have no response.";
+    if (!replyText) {
+      console.log("❌ Model returned empty response.");
+      replyText = "I received your document, but I'm not sure what you want me to do with it. Could you please ask a specific question about it?";
+    }
 
+    // --- 4. SEND REPLY ---
     if (TELEGRAM_TOKEN) {
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         chat_id: chatId,
@@ -143,11 +134,11 @@ app.post('/webhook', async (req, res) => {
     }
 
   } catch (error) {
-    console.error("❌ Error processing message:", error);
+    console.error("❌ Critical Error:", error);
     if (TELEGRAM_TOKEN) {
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         chat_id: chatId,
-        text: "Sorry, I encountered an error processing that message."
+        text: "I encountered a technical error reading that file. Please try sending it again as a PDF or Image."
       });
     }
   }
@@ -156,7 +147,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('Bot is running with Voice, Image, and PDF support!');
+  res.send('Bot is running v3 (File Fix)');
 });
 
 app.listen(PORT, () => {
