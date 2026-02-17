@@ -229,6 +229,7 @@ CRITICAL RULES:
 5. Use selected language consistently
 6. Be conversational and natural
 7. This is advisory ONLY - no legal advice
+8. STRICTLY DO NOT FORMAT OUTPUT TEXT - Output text exactly as written without any additional formatting, markdown, HTML tags, or special characters
 
 BEGIN by starting Stage 1 (Language Selection).`,
 });
