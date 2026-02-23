@@ -32,9 +32,9 @@ type TemplateProfile = {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const TEMPLATE_FILES: Record<ContractTemplateType, string> = {
-  commercial: path.resolve(__dirname, '../contract reference/commercial contract.pdf'),
-  residential: path.resolve(__dirname, '../contract reference/Residential contract.pdf')
+const TEMPLATE_FILE_NAMES: Record<ContractTemplateType, string> = {
+  commercial: 'commercial contract.pdf',
+  residential: 'Residential contract.pdf'
 };
 
 const EN_STOPWORDS = new Set([
@@ -66,6 +66,31 @@ const ATTESTATION_MARKERS = {
 } as const;
 
 let cachedTemplatesPromise: Promise<TemplateProfile[]> | null = null;
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveTemplateFilePath(fileName: string): Promise<string | null> {
+  const candidatePaths = [
+    path.resolve(process.cwd(), 'contract reference', fileName),
+    path.resolve(__dirname, '../contract reference', fileName),
+    path.resolve(__dirname, '../../contract reference', fileName)
+  ];
+
+  for (const candidatePath of candidatePaths) {
+    if (await fileExists(candidatePath)) {
+      return candidatePath;
+    }
+  }
+
+  return null;
+}
 
 function normalizeText(input: string): string {
   return input
@@ -123,8 +148,27 @@ async function loadTemplateProfiles(): Promise<TemplateProfile[]> {
   if (cachedTemplatesPromise) return cachedTemplatesPromise;
 
   cachedTemplatesPromise = (async () => {
+    const resolvedFiles = await Promise.all(
+      Object.entries(TEMPLATE_FILE_NAMES).map(async ([type, fileName]) => {
+        const resolvedPath = await resolveTemplateFilePath(fileName);
+        return {
+          type: type as ContractTemplateType,
+          resolvedPath
+        };
+      })
+    );
+
+    const missingTemplates = resolvedFiles
+      .filter((entry) => !entry.resolvedPath)
+      .map((entry) => entry.type);
+
+    if (missingTemplates.length > 0) {
+      throw new Error(`REFERENCE_TEMPLATE_MISSING:${missingTemplates.join(',')}`);
+    }
+
     const entries = await Promise.all(
-      Object.entries(TEMPLATE_FILES).map(async ([type, absolutePath]) => {
+      resolvedFiles.map(async ({ type, resolvedPath }) => {
+        const absolutePath = resolvedPath as string;
         const buffer = await fs.readFile(absolutePath);
         const parsed = await pdfParse(buffer);
         const text = parsed.text || '';
@@ -143,7 +187,10 @@ async function loadTemplateProfiles(): Promise<TemplateProfile[]> {
     );
 
     return entries;
-  })();
+  })().catch((error) => {
+    cachedTemplatesPromise = null;
+    throw error;
+  });
 
   return cachedTemplatesPromise;
 }
@@ -347,11 +394,18 @@ export const validateContractLegitimacyTool = new FunctionTool({
         message: resultMessage
       };
     } catch (error) {
+      const errorMessage = (error as Error).message || '';
+      const isReferenceError = errorMessage.startsWith('REFERENCE_TEMPLATE_MISSING:');
+
       return {
         status: 'failed',
         isLegitContract: false,
-        reasonCode: 'VALIDATION_ERROR' satisfies ContractValidationReasonCode,
-        reason: `Unable to complete template-based contract legitimacy verification: ${(error as Error).message}`
+        reasonCode: isReferenceError
+          ? ('REFERENCE_UNAVAILABLE' satisfies ContractValidationReasonCode)
+          : ('VALIDATION_ERROR' satisfies ContractValidationReasonCode),
+        reason: isReferenceError
+          ? 'Reference contract templates are unavailable for verification.'
+          : `Unable to complete template-based contract legitimacy verification: ${(error as Error).message}`
       };
     }
   }
