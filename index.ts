@@ -10,6 +10,8 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 8080;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const MAX_DOCUMENT_TEXT_SNIPPET = 3500;
+const TYPING_REFRESH_MS = 4000;
 
 // 1. Session Management
 const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -67,6 +69,14 @@ app.post('/webhook', async (req, res) => {
   const sessionId = `telegram_${chatId}`;
   const userId = `user_${chatId}`;
 
+  const sendTypingAction = async () => {
+    if (!TELEGRAM_TOKEN) return;
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendChatAction`, {
+      chat_id: chatId,
+      action: 'typing'
+    }).catch(() => {});
+  };
+
   try {
     // --- COMMANDS ---
     if (userText === '/reset' || userText === '/start') {
@@ -112,7 +122,7 @@ app.post('/webhook', async (req, res) => {
     if (hasFile) {
       if (!userText) userText = "Analyze this document.";
       const trimmedText = extractedText.trim();
-      const textSnippet = trimmedText ? trimmedText.slice(0, 8000) : '';
+      const textSnippet = trimmedText ? trimmedText.slice(0, MAX_DOCUMENT_TEXT_SNIPPET) : '';
 
       userText += `\n\n[DOCUMENT TEXT EXTRACTED LOCALLY]\n`;
       userText += `Mime: ${detectedMime || 'unknown'}\n`;
@@ -127,73 +137,72 @@ app.post('/webhook', async (req, res) => {
     await ensureSession(userId, sessionId);
     console.log(`🚀 Processing message for ${chatId}...`);
 
-    // Send typing indicator immediately
+    // Keep typing indicator alive while model is processing
+    await sendTypingAction();
+    const typingInterval = setInterval(() => {
+      void sendTypingAction();
+    }, TYPING_REFRESH_MS);
+
+    let replyText = '';
+    let lastSentLength = 0;
+    let messageId: number | null = null;
+    let lastEditAt = 0;
+
+    // Send placeholder immediately so user sees instant response
     if (TELEGRAM_TOKEN) {
-      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendChatAction`, {
+      const placeholder = await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         chat_id: chatId,
-        action: 'typing'
-      }).catch(() => {});
+        text: '⏳ Processing your request...'
+      }).catch(() => null);
+      messageId = placeholder?.data?.result?.message_id ?? null;
     }
 
     const events = runner.runAsync({
       userId, sessionId,
       newMessage: { role: 'user', parts: messageParts }
     });
+    try {
+      for await (const event of events) {
+        const text = stringifyContent(event);
+        if (text) replyText += text;
 
-    let replyText = '';
-    let lastSentLength = 0;
-    let messageId: number | null = null;
-
-    for await (const event of events) {
-      const text = stringifyContent(event);
-      if (text) replyText += text;
-
-      // Stream response: send/update message every 150 chars or on final response
-      if (replyText.length - lastSentLength > 150 || replyText.length > 3000) {
-        if (TELEGRAM_TOKEN) {
+        const now = Date.now();
+        const shouldEdit = replyText.length - lastSentLength > 80 || (now - lastEditAt > 1800 && replyText.length > 0);
+        if (shouldEdit && TELEGRAM_TOKEN && messageId) {
           try {
-            if (!messageId) {
-              // First message
-              const resp = await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-                chat_id: chatId,
-                text: replyText || '⏳ Processing...'
-              });
-              messageId = resp.data.result.message_id;
-            } else {
-              // Edit existing message
-              await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/editMessageText`, {
-                chat_id: chatId,
-                message_id: messageId,
-                text: replyText
-              }).catch(() => {}); // Ignore edit errors (too frequent)
-            }
+            await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/editMessageText`, {
+              chat_id: chatId,
+              message_id: messageId,
+              text: replyText
+            }).catch(() => {});
             lastSentLength = replyText.length;
+            lastEditAt = now;
           } catch (e) {
             console.log("Stream update failed (non-critical):", (e as any).message);
           }
         }
       }
-    }
 
-    // --- FINAL RESPONSE ---
-    if (!replyText) {
-      console.log("❌ Gemini Blocked Response.");
-      replyText = "⚠️ Security Filter Triggered\n\nThe AI refused to read this file. This usually happens with Rental Contracts containing private data.\n\nSolution: Please send a Screenshot (Image) of the first page instead of the PDF file.";
-    }
+      // --- FINAL RESPONSE ---
+      if (!replyText) {
+        console.log("❌ Gemini Blocked Response.");
+        replyText = "⚠️ Security Filter Triggered\n\nThe AI refused to read this file. This usually happens with Rental Contracts containing private data.\n\nSolution: Please send a Screenshot (Image) of the first page instead of the PDF file.";
+      }
 
-    if (TELEGRAM_TOKEN && messageId) {
-      // Update final message
-      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/editMessageText`, {
-        chat_id: chatId,
-        message_id: messageId,
-        text: replyText
-      }).catch(() => {});
-    } else if (TELEGRAM_TOKEN && !messageId) {
-      // Send final if no streaming happened
-      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-        chat_id: chatId,
-        text: replyText
-      });
+      if (TELEGRAM_TOKEN && messageId) {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/editMessageText`, {
+          chat_id: chatId,
+          message_id: messageId,
+          text: replyText
+        }).catch(() => {});
+      } else if (TELEGRAM_TOKEN && !messageId) {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+          chat_id: chatId,
+          text: replyText
+        });
+      }
+    } finally {
+      clearInterval(typingInterval);
     }
 
   } catch (error) {
