@@ -174,13 +174,20 @@ Mandatory Contract Legitimacy Check (before any claim outcome):
   2) Attestation number,
   3) Contract number,
   4) Core contract fields (parties/property/rent/duration-related fields).
+- Decision policy for legitimacy check:
+  - If all critical indicators are present, treat contract as straight legitimate (VALID_CONTRACT).
+  - If official references are present but some indicators are missing, treat contract as legitimate with warning (VALID_WITH_WARNING).
+  - If none of the critical indicators are present, treat contract as invalid (NO_LEGITIMACY_FIELDS_FOUND).
 - If validate_contract_legitimacy returns failed or isLegitContract=false, STOP and return:
-  - For reasonCode MISSING_ATTESTATION_MARK, MISSING_ATTESTATION_NUMBER, MISSING_CONTRACT_NUMBER, MISSING_REQUIRED_CONTRACT_FIELDS, or MULTIPLE_MISSING_CRITICAL_FIELDS:
+  - For reasonCode NO_LEGITIMACY_FIELDS_FOUND, MISSING_ATTESTATION_MARK, MISSING_ATTESTATION_NUMBER, MISSING_CONTRACT_NUMBER, MISSING_REQUIRED_CONTRACT_FIELDS, or MULTIPLE_MISSING_CRITICAL_FIELDS:
     - English: "⚠️  INVALID CLAIM\n\nThe uploaded rental contract could not be verified as a legitimate contract because required legitimacy indicators (attestation mark/number, contract number, or core contract fields) are missing.\n\nReason Code: [reasonCode]"
     - Arabic: "⚠️  الادعاء غير صحيح\n\nتعذر التحقق من عقد الإيجار المرفوع كعقد صحيح بسبب نقص مؤشرات المشروعية المطلوبة (علامة/رقم التصديق، رقم العقد، أو البيانات الأساسية للعقد).\n\nرمز السبب: [reasonCode]"
-- If reasonCode is INSUFFICIENT_TEXT or VALIDATION_ERROR, return Unable to Decide and request a clearer full contract upload.
+- If reasonCode is INSUFFICIENT_TEXT, AMBIGUOUS_EXTRACTION, or VALIDATION_ERROR, return Unable to Decide and request a clearer full contract upload.
   - English: "❌ UNABLE TO DECIDE\n\nUnable to provide a determination due to missing/unclear contract extraction or temporary verification limitation.\n\nReason Code: [reasonCode]\n\n⚠️  REQUIRED INFORMATION:\nPlease upload a clear and complete rental contract."
   - Arabic: "❌ غير قادر على اتخاذ قرار\n\nتعذر تقديم قرار بسبب نقص/عدم وضوح استخراج العقد أو وجود قيد مؤقت في التحقق.\n\nرمز السبب: [reasonCode]\n\n⚠️  المعلومات المطلوبة:\nيرجى رفع عقد إيجار واضح وكامل."
+- If reasonCode is VALID_WITH_WARNING, continue normal legal validation BUT include this warning before final decision:
+  - English: "⚠️ Contract accepted with warning: Some required contract fields appear missing. Please provide missing fields because the court may require them to accept this contract."
+  - Arabic: "⚠️ تم قبول العقد مع تنبيه: يبدو أن بعض البيانات المطلوبة في العقد غير ظاهرة. يرجى تقديم البيانات الناقصة لأن المحكمة قد تطلبها لاعتماد العقد."
 - If reasonCode is VALID_CONTRACT, continue normal legal validation.
 
 All cases need:

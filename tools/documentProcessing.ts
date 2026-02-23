@@ -8,7 +8,10 @@ import { z } from 'zod';
 
 type ContractValidationReasonCode =
   | 'VALID_CONTRACT'
+  | 'VALID_WITH_WARNING'
   | 'INSUFFICIENT_TEXT'
+  | 'AMBIGUOUS_EXTRACTION'
+  | 'NO_LEGITIMACY_FIELDS_FOUND'
   | 'MISSING_ATTESTATION_MARK'
   | 'MISSING_ATTESTATION_NUMBER'
   | 'MISSING_CONTRACT_NUMBER'
@@ -43,6 +46,9 @@ const ATTESTATION_MARKERS = {
   declaration: /attest|attestation|declare|declaration|إقرار|يشهد|شهادة/i,
   idProof: /id|identity|passport|emirates id|هوية|بطاقة|جواز/i
 } as const;
+
+const OFFICIAL_REFERENCE_NUMBER_PATTERN = /(?:رقم\s*(?:الطلب|العقد|التصديق|المرجع)|request\s*(?:number|no\.?)|application\s*(?:number|no\.?)|contract\s*(?:number|no\.?)|attestation\s*(?:number|no\.?)|document\s*(?:number|no\.?)|reference\s*(?:number|no\.?))\s*[:\-]?\s*([A-Z0-9\u0660-\u0669\/\-]{3,})/iu;
+const GENERAL_DOC_CODE_PATTERN = /\b[A-Z]{2,5}-\d{2,6}(?:-\d{1,8})?\b|\b\d{2,4}-\d{3,10}\b/u;
 
 function normalizeText(input: string): string {
   return input
@@ -222,10 +228,26 @@ export const validateContractLegitimacyTool = new FunctionTool({
       const formatHitCount = Object.values(formatHits).filter(Boolean).length;
       const documentAttestationSet = extractAttestationSet(textContent);
       const hasAttestationMark = ATTESTATION_MARKERS.stamp.test(textContent) || ATTESTATION_MARKERS.declaration.test(textContent);
-      const hasAttestationNumber = /(attestation|attested|certification|تصديق|موثق|توثيق)\s*(number|no\.?|#|رقم)?\s*[:\-]?[\sA-Z0-9\/\-]{3,}/iu.test(textContent);
-      const hasContractNumber = /(contract|lease|tenancy|عقد|الإيجار)\s*(number|no\.?|#|رقم)?\s*[:\-]?[\sA-Z0-9\/\-]{3,}/iu.test(textContent);
+      const hasExplicitAttestationNumber = /(attestation|attested|certification|تصديق|موثق|توثيق)\s*(number|no\.?|#|رقم)?\s*[:\-]?[\sA-Z0-9\u0660-\u0669\/\-]{3,}/iu.test(textContent);
+      const hasExplicitContractNumber = /(contract|lease|tenancy|عقد|الإيجار)\s*(number|no\.?|#|رقم)?\s*[:\-]?[\sA-Z0-9\u0660-\u0669\/\-]{3,}/iu.test(textContent);
+      const hasOfficialReferenceNumber = OFFICIAL_REFERENCE_NUMBER_PATTERN.test(textContent) || GENERAL_DOC_CODE_PATTERN.test(textContent);
+      const hasAttestationNumber = hasExplicitAttestationNumber || (hasAttestationMark && hasOfficialReferenceNumber);
+      const hasContractNumber = hasExplicitContractNumber || (/(contract|lease|tenancy|عقد|الإيجار)/iu.test(textContent) && hasOfficialReferenceNumber);
       const hasSignaturesOrWitness = documentAttestationSet.has('signatures') || documentAttestationSet.has('witnesses');
-      const hasRequiredContractFields = formatHitCount >= 4;
+      const hasRequiredContractFields = formatHitCount >= 2;
+
+      const criticalFieldStates = {
+        attestationMark: hasAttestationMark,
+        attestationNumber: hasAttestationNumber,
+        contractNumber: hasContractNumber,
+        requiredContractFields: hasRequiredContractFields
+      };
+
+      const presentCriticalCount = Object.values(criticalFieldStates).filter(Boolean).length;
+      const totalCriticalCount = Object.keys(criticalFieldStates).length;
+      const allCriticalPresent = presentCriticalCount === totalCriticalCount;
+      const noCriticalPresent = presentCriticalCount === 0;
+      const someCriticalMissing = presentCriticalCount > 0 && presentCriticalCount < totalCriticalCount;
 
       const missingCriticalItems: string[] = [];
       if (!hasAttestationMark) missingCriticalItems.push('attestationMark');
@@ -234,10 +256,16 @@ export const validateContractLegitimacyTool = new FunctionTool({
       if (!hasRequiredContractFields) missingCriticalItems.push('requiredContractFields');
 
       let reasonCode: ContractValidationReasonCode = 'VALID_CONTRACT';
-      if (missingCriticalItems.length >= 2) {
-        reasonCode = 'MULTIPLE_MISSING_CRITICAL_FIELDS';
+      if (allCriticalPresent) {
+        reasonCode = 'VALID_CONTRACT';
+      } else if (noCriticalPresent) {
+        reasonCode = 'NO_LEGITIMACY_FIELDS_FOUND';
+      } else if (someCriticalMissing && hasOfficialReferenceNumber) {
+        reasonCode = 'VALID_WITH_WARNING';
       } else if (!hasAttestationMark) {
         reasonCode = 'MISSING_ATTESTATION_MARK';
+      } else if (!hasAttestationNumber && !hasContractNumber) {
+        reasonCode = 'MULTIPLE_MISSING_CRITICAL_FIELDS';
       } else if (!hasAttestationNumber) {
         reasonCode = 'MISSING_ATTESTATION_NUMBER';
       } else if (!hasContractNumber) {
@@ -246,14 +274,16 @@ export const validateContractLegitimacyTool = new FunctionTool({
         reasonCode = 'MISSING_REQUIRED_CONTRACT_FIELDS';
       }
 
-      const isLegitContract = reasonCode === 'VALID_CONTRACT';
+      const isLegitContract = reasonCode === 'VALID_CONTRACT' || reasonCode === 'VALID_WITH_WARNING';
 
       const missingFormatItems = Object.entries(formatHits)
         .filter(([, found]) => !found)
         .map(([key]) => key);
 
       const resultMessage = isLegitContract
-        ? 'Contract appears legitimate based on attestation details, identifiers, and required contract fields found in the uploaded document.'
+        ? reasonCode === 'VALID_WITH_WARNING'
+          ? 'Contract is treated as legitimate based on official references, but some required legitimacy fields are missing and should be provided for court acceptance.'
+          : 'Contract appears legitimate based on attestation details, identifiers, and required contract fields found in the uploaded document.'
         : 'Contract legitimacy check failed because one or more required contract legitimacy indicators were not found in the uploaded document.';
 
       return {
@@ -261,10 +291,19 @@ export const validateContractLegitimacyTool = new FunctionTool({
         fileName: fileName || null,
         isLegitContract,
         reasonCode,
+        legitimacyStatus: reasonCode === 'VALID_CONTRACT'
+          ? 'STRAIGHT_LEGIT'
+          : reasonCode === 'VALID_WITH_WARNING'
+            ? 'LEGIT_WITH_WARNING'
+            : 'INVALID',
+        warning: reasonCode === 'VALID_WITH_WARNING'
+          ? 'Some required contract fields are missing. Please provide the missing fields because the court may require them to accept the contract.'
+          : null,
         checks: {
           hasAttestationMark,
           hasAttestationNumber,
           hasContractNumber,
+          hasOfficialReferenceNumber,
           hasSignaturesOrWitness,
           hasRequiredContractFields
         },
