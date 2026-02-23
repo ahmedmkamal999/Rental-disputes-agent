@@ -5,37 +5,16 @@
 
 import { FunctionTool } from '@google/adk';
 import { z } from 'zod';
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import pdfParse from 'pdf-parse';
-
-type ContractTemplateType = 'commercial' | 'residential';
 
 type ContractValidationReasonCode =
   | 'VALID_CONTRACT'
   | 'INSUFFICIENT_TEXT'
-  | 'REFERENCE_UNAVAILABLE'
-  | 'FORMAT_MISMATCH'
-  | 'ATTESTATION_MISMATCH'
-  | 'FORMAT_AND_ATTESTATION_MISMATCH'
+  | 'MISSING_ATTESTATION_MARK'
+  | 'MISSING_ATTESTATION_NUMBER'
+  | 'MISSING_CONTRACT_NUMBER'
+  | 'MISSING_REQUIRED_CONTRACT_FIELDS'
+  | 'MULTIPLE_MISSING_CRITICAL_FIELDS'
   | 'VALIDATION_ERROR';
-
-type TemplateProfile = {
-  type: ContractTemplateType;
-  text: string;
-  normalizedText: string;
-  tokenSet: Set<string>;
-  attestationSet: Set<string>;
-};
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const TEMPLATE_FILE_NAMES: Record<ContractTemplateType, string> = {
-  commercial: 'commercial contract.pdf',
-  residential: 'Residential contract.pdf'
-};
 
 const EN_STOPWORDS = new Set([
   'the', 'and', 'or', 'for', 'with', 'this', 'that', 'from', 'are', 'was', 'were', 'been',
@@ -64,33 +43,6 @@ const ATTESTATION_MARKERS = {
   declaration: /attest|attestation|declare|declaration|إقرار|يشهد|شهادة/i,
   idProof: /id|identity|passport|emirates id|هوية|بطاقة|جواز/i
 } as const;
-
-let cachedTemplatesPromise: Promise<TemplateProfile[]> | null = null;
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function resolveTemplateFilePath(fileName: string): Promise<string | null> {
-  const candidatePaths = [
-    path.resolve(process.cwd(), 'contract reference', fileName),
-    path.resolve(__dirname, '../contract reference', fileName),
-    path.resolve(__dirname, '../../contract reference', fileName)
-  ];
-
-  for (const candidatePath of candidatePaths) {
-    if (await fileExists(candidatePath)) {
-      return candidatePath;
-    }
-  }
-
-  return null;
-}
 
 function normalizeText(input: string): string {
   return input
@@ -142,57 +94,6 @@ function extractAttestationSet(text: string): Set<string> {
   if (ATTESTATION_MARKERS.declaration.test(text)) set.add('declaration');
   if (ATTESTATION_MARKERS.idProof.test(text)) set.add('idProof');
   return set;
-}
-
-async function loadTemplateProfiles(): Promise<TemplateProfile[]> {
-  if (cachedTemplatesPromise) return cachedTemplatesPromise;
-
-  cachedTemplatesPromise = (async () => {
-    const resolvedFiles = await Promise.all(
-      Object.entries(TEMPLATE_FILE_NAMES).map(async ([type, fileName]) => {
-        const resolvedPath = await resolveTemplateFilePath(fileName);
-        return {
-          type: type as ContractTemplateType,
-          resolvedPath
-        };
-      })
-    );
-
-    const missingTemplates = resolvedFiles
-      .filter((entry) => !entry.resolvedPath)
-      .map((entry) => entry.type);
-
-    if (missingTemplates.length > 0) {
-      throw new Error(`REFERENCE_TEMPLATE_MISSING:${missingTemplates.join(',')}`);
-    }
-
-    const entries = await Promise.all(
-      resolvedFiles.map(async ({ type, resolvedPath }) => {
-        const absolutePath = resolvedPath as string;
-        const buffer = await fs.readFile(absolutePath);
-        const parsed = await pdfParse(buffer);
-        const text = parsed.text || '';
-        const normalizedText = normalizeText(text);
-        const tokenSet = tokenize(text);
-        const attestationSet = extractAttestationSet(text);
-
-        return {
-          type: type as ContractTemplateType,
-          text,
-          normalizedText,
-          tokenSet,
-          attestationSet
-        } satisfies TemplateProfile;
-      })
-    );
-
-    return entries;
-  })().catch((error) => {
-    cachedTemplatesPromise = null;
-    throw error;
-  });
-
-  return cachedTemplatesPromise;
 }
 
 /**
@@ -300,7 +201,7 @@ export const confirmExtractedDataTool = new FunctionTool({
  */
 export const validateContractLegitimacyTool = new FunctionTool({
   name: 'validate_contract_legitimacy',
-  description: 'Validates whether a rental contract is legitimate by comparing it against reference commercial/residential contract templates and checking attestation similarity.',
+  description: 'Validates whether a rental contract is legitimate using identifiers and attestation details found in the uploaded contract itself (no reference templates).',
   parameters: z.object({
     textContent: z.string().describe('Full extracted text of the uploaded rental contract'),
     fileName: z.string().optional().describe('Optional uploaded file name for reporting')
@@ -317,95 +218,70 @@ export const validateContractLegitimacyTool = new FunctionTool({
     }
 
     try {
-      const templates = await loadTemplateProfiles();
-      if (templates.length === 0) {
-        return {
-          status: 'failed',
-          isLegitContract: false,
-          reasonCode: 'REFERENCE_UNAVAILABLE' satisfies ContractValidationReasonCode,
-          reason: 'Reference contract templates are unavailable for verification.'
-        };
-      }
-
-      const documentTokenSet = tokenize(textContent);
       const formatHits = extractFormatMarkerHits(textContent);
       const formatHitCount = Object.values(formatHits).filter(Boolean).length;
-      const formatCoverage = formatHitCount / Object.keys(formatHits).length;
       const documentAttestationSet = extractAttestationSet(textContent);
+      const hasAttestationMark = ATTESTATION_MARKERS.stamp.test(textContent) || ATTESTATION_MARKERS.declaration.test(textContent);
+      const hasAttestationNumber = /(attestation|attested|certification|تصديق|موثق|توثيق)\s*(number|no\.?|#|رقم)?\s*[:\-]?[\sA-Z0-9\/\-]{3,}/iu.test(textContent);
+      const hasContractNumber = /(contract|lease|tenancy|عقد|الإيجار)\s*(number|no\.?|#|رقم)?\s*[:\-]?[\sA-Z0-9\/\-]{3,}/iu.test(textContent);
+      const hasSignaturesOrWitness = documentAttestationSet.has('signatures') || documentAttestationSet.has('witnesses');
+      const hasRequiredContractFields = formatHitCount >= 4;
 
-      const perTemplate = templates.map((template) => {
-        const lexicalSimilarity = jaccardSimilarity(documentTokenSet, template.tokenSet);
-        const attestationSimilarity = jaccardSimilarity(documentAttestationSet, template.attestationSet);
-        const combinedSimilarity = (lexicalSimilarity * 0.7) + (formatCoverage * 0.2) + (attestationSimilarity * 0.1);
-
-        return {
-          templateType: template.type,
-          lexicalSimilarity,
-          attestationSimilarity,
-          combinedSimilarity,
-          templateAttestationMarkers: Array.from(template.attestationSet)
-        };
-      });
-
-      const bestMatch = perTemplate.sort((a, b) => b.combinedSimilarity - a.combinedSimilarity)[0];
-
-      const hasSimilarFormat = formatHitCount >= 4 && bestMatch.lexicalSimilarity >= 0.08;
-      const hasSimilarAttestation = documentAttestationSet.size >= 2 && bestMatch.attestationSimilarity >= 0.34;
-      const isLegitContract = hasSimilarFormat && hasSimilarAttestation;
+      const missingCriticalItems: string[] = [];
+      if (!hasAttestationMark) missingCriticalItems.push('attestationMark');
+      if (!hasAttestationNumber) missingCriticalItems.push('attestationNumber');
+      if (!hasContractNumber) missingCriticalItems.push('contractNumber');
+      if (!hasRequiredContractFields) missingCriticalItems.push('requiredContractFields');
 
       let reasonCode: ContractValidationReasonCode = 'VALID_CONTRACT';
-      if (!isLegitContract) {
-        if (!hasSimilarFormat && !hasSimilarAttestation) {
-          reasonCode = 'FORMAT_AND_ATTESTATION_MISMATCH';
-        } else if (!hasSimilarFormat) {
-          reasonCode = 'FORMAT_MISMATCH';
-        } else if (!hasSimilarAttestation) {
-          reasonCode = 'ATTESTATION_MISMATCH';
-        }
+      if (missingCriticalItems.length >= 2) {
+        reasonCode = 'MULTIPLE_MISSING_CRITICAL_FIELDS';
+      } else if (!hasAttestationMark) {
+        reasonCode = 'MISSING_ATTESTATION_MARK';
+      } else if (!hasAttestationNumber) {
+        reasonCode = 'MISSING_ATTESTATION_NUMBER';
+      } else if (!hasContractNumber) {
+        reasonCode = 'MISSING_CONTRACT_NUMBER';
+      } else if (!hasRequiredContractFields) {
+        reasonCode = 'MISSING_REQUIRED_CONTRACT_FIELDS';
       }
+
+      const isLegitContract = reasonCode === 'VALID_CONTRACT';
 
       const missingFormatItems = Object.entries(formatHits)
         .filter(([, found]) => !found)
         .map(([key]) => key);
 
       const resultMessage = isLegitContract
-        ? `Contract appears legitimate and is similar to the ${bestMatch.templateType} reference format and attestation.`
-        : 'Contract legitimacy check failed: format and/or attestation does not sufficiently match reference templates.';
+        ? 'Contract appears legitimate based on attestation details, identifiers, and required contract fields found in the uploaded document.'
+        : 'Contract legitimacy check failed because one or more required contract legitimacy indicators were not found in the uploaded document.';
 
       return {
         status: isLegitContract ? 'success' : 'failed',
         fileName: fileName || null,
         isLegitContract,
         reasonCode,
-        matchedTemplateType: bestMatch.templateType,
         checks: {
-          hasSimilarFormat,
-          hasSimilarAttestation,
-          formatCoverage,
-          lexicalSimilarity: bestMatch.lexicalSimilarity,
-          attestationSimilarity: bestMatch.attestationSimilarity
+          hasAttestationMark,
+          hasAttestationNumber,
+          hasContractNumber,
+          hasSignaturesOrWitness,
+          hasRequiredContractFields
         },
         findings: {
           detectedFormatMarkers: formatHits,
           missingFormatItems,
           documentAttestationMarkers: Array.from(documentAttestationSet),
-          referenceAttestationMarkers: bestMatch.templateAttestationMarkers
+          missingCriticalItems
         },
         message: resultMessage
       };
     } catch (error) {
-      const errorMessage = (error as Error).message || '';
-      const isReferenceError = errorMessage.startsWith('REFERENCE_TEMPLATE_MISSING:');
-
       return {
         status: 'failed',
         isLegitContract: false,
-        reasonCode: isReferenceError
-          ? ('REFERENCE_UNAVAILABLE' satisfies ContractValidationReasonCode)
-          : ('VALIDATION_ERROR' satisfies ContractValidationReasonCode),
-        reason: isReferenceError
-          ? 'Reference contract templates are unavailable for verification.'
-          : `Unable to complete template-based contract legitimacy verification: ${(error as Error).message}`
+        reasonCode: 'VALIDATION_ERROR' satisfies ContractValidationReasonCode,
+        reason: `Unable to complete contract legitimacy verification: ${(error as Error).message}`
       };
     }
   }

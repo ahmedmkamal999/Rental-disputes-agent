@@ -9,7 +9,7 @@ A Google ADK-powered agent that performs preliminary validation of rental disput
    - Language selection
    - Role identification (Landlord/Tenant)
    - Document collection (contract, claim, supporting docs)
-   - Contract legitimacy check against reference templates (commercial/residential format + attestation)
+   - Contract legitimacy check from the uploaded contract itself (attestation mark/number, contract number, core fields)
    - Clarifications to apply the law
    - Final decision with law references
 
@@ -55,7 +55,7 @@ npm start
 2. **Role Identification**: Landlord or Tenant
 3. **Document Collection**: Provide rental contract, statement of claim, and any supporting documents
 4. **Clarifications**: The agent asks for any missing details needed to apply the law
-5. **Contract Legitimacy Gate**: Rental contract must match the reference commercial/residential contract structure and attestation indicators
+5. **Contract Legitimacy Gate**: Rental contract must contain verifiable legitimacy indicators in the document itself (attestation mark, attestation number, contract number, and core contract data)
 6. **Decision**: Receive one of three outcomes with legal references:
    - ✅ **Valid Claim**
    - ⚠️ **Invalid Claim**
