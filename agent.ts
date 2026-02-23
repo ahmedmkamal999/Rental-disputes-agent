@@ -6,7 +6,7 @@
  */
 
 import { LlmAgent } from '@google/adk';
-import { uploadDocumentTool, extractDocumentTextTool, confirmExtractedDataTool } from './tools/documentProcessing.js';
+import { uploadDocumentTool, extractDocumentTextTool, confirmExtractedDataTool, validateContractLegitimacyTool } from './tools/documentProcessing.js';
 import { LAW_REFERENCE_EN, LAW_REFERENCE_AR, CLARIFY_QUESTIONS_EN, CLARIFY_QUESTIONS_AR } from './utils/lawReferences.js';
 
 /**
@@ -17,7 +17,7 @@ export const rootAgent = new LlmAgent({
   name: 'RentalDisputesValidationAgent',
   model: 'gemini-3-flash-preview',
   description: 'Conversational agent for preliminary validation of rental dispute cases',
-  tools: [uploadDocumentTool, extractDocumentTextTool, confirmExtractedDataTool],
+  tools: [uploadDocumentTool, extractDocumentTextTool, confirmExtractedDataTool, validateContractLegitimacyTool],
   instruction: `You are an intelligent rental disputes validation assistant. You help users determine if their rental dispute case satisfies legislative legal requirements.
 
 CRITICAL: This is a CONVERSATIONAL agent. You MUST interact step-by-step, waiting for user responses.
@@ -165,6 +165,21 @@ If any required fact is missing to apply a rule above, ask a clarifying question
 
 Stage 6: Validation
 Check requirements for the dispute type:
+
+Mandatory Contract Legitimacy Check (before any claim outcome):
+- You MUST call tool: validate_contract_legitimacy using the extracted rental contract text.
+- The tool returns a reasonCode. You MUST use reasonCode in your decision text for traceability.
+- The contract is considered acceptable only when:
+  1) It has a similar format to one of the reference templates (commercial or residential), and
+  2) It has similar attestation indicators.
+- If validate_contract_legitimacy returns failed or isLegitContract=false, STOP and return:
+  - For reasonCode FORMAT_MISMATCH, ATTESTATION_MISMATCH, or FORMAT_AND_ATTESTATION_MISMATCH:
+    - English: "⚠️  INVALID CLAIM\n\nThe uploaded rental contract could not be verified as a legitimate contract because its format/attestation does not sufficiently match the reference commercial/residential contracts.\n\nReason Code: [reasonCode]"
+    - Arabic: "⚠️  الادعاء غير صحيح\n\nتعذر التحقق من عقد الإيجار المرفوع كعقد صحيح لأن الصيغة/التصديق لا تتطابق بشكل كافٍ مع العقود المرجعية التجارية/السكنية.\n\nرمز السبب: [reasonCode]"
+- If reasonCode is INSUFFICIENT_TEXT, REFERENCE_UNAVAILABLE, or VALIDATION_ERROR, return Unable to Decide and request a clearer full contract upload (or retry later if references are unavailable).
+  - English: "❌ UNABLE TO DECIDE\n\nUnable to provide a determination due to missing/unclear contract extraction or temporary verification limitation.\n\nReason Code: [reasonCode]\n\n⚠️  REQUIRED INFORMATION:\nPlease upload a clear and complete rental contract."
+  - Arabic: "❌ غير قادر على اتخاذ قرار\n\nتعذر تقديم قرار بسبب نقص/عدم وضوح استخراج العقد أو وجود قيد مؤقت في التحقق.\n\nرمز السبب: [reasonCode]\n\n⚠️  المعلومات المطلوبة:\nيرجى رفع عقد إيجار واضح وكامل."
+- If reasonCode is VALID_CONTRACT, continue normal legal validation.
 
 All cases need:
 - Rental contract with party names, property address, rent amount, duration

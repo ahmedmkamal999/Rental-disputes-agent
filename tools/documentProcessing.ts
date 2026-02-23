@@ -5,6 +5,148 @@
 
 import { FunctionTool } from '@google/adk';
 import { z } from 'zod';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import pdfParse from 'pdf-parse';
+
+type ContractTemplateType = 'commercial' | 'residential';
+
+type ContractValidationReasonCode =
+  | 'VALID_CONTRACT'
+  | 'INSUFFICIENT_TEXT'
+  | 'REFERENCE_UNAVAILABLE'
+  | 'FORMAT_MISMATCH'
+  | 'ATTESTATION_MISMATCH'
+  | 'FORMAT_AND_ATTESTATION_MISMATCH'
+  | 'VALIDATION_ERROR';
+
+type TemplateProfile = {
+  type: ContractTemplateType;
+  text: string;
+  normalizedText: string;
+  tokenSet: Set<string>;
+  attestationSet: Set<string>;
+};
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const TEMPLATE_FILES: Record<ContractTemplateType, string> = {
+  commercial: path.resolve(__dirname, '../contract reference/commercial contract.pdf'),
+  residential: path.resolve(__dirname, '../contract reference/Residential contract.pdf')
+};
+
+const EN_STOPWORDS = new Set([
+  'the', 'and', 'or', 'for', 'with', 'this', 'that', 'from', 'are', 'was', 'were', 'been',
+  'shall', 'will', 'have', 'has', 'had', 'not', 'you', 'your', 'their', 'its', 'into', 'upon',
+  'about', 'between', 'under', 'over', 'there', 'here', 'than', 'then', 'such'
+]);
+
+const AR_STOPWORDS = new Set([
+  'من', 'في', 'على', 'الى', 'إلى', 'عن', 'هذا', 'هذه', 'ذلك', 'تلك', 'كما', 'وقد', 'و', 'مع',
+  'تم', 'لدى', 'حسب', 'بعد', 'قبل', 'او', 'أو', 'أن', 'إن', 'ما', 'لا', 'لم', 'لن', 'هو', 'هي'
+]);
+
+const FORMAT_MARKERS = {
+  parties: /landlord|tenant|lessor|lessee|مالك|مؤجر|مستأجر|طرف/i,
+  property: /property|premises|address|unit|عنوان|العقار|الوحدة|العين المؤجرة/i,
+  rent: /rent|rental|amount|payment|currency|إيجار|قيمة|مبلغ|بدل الإيجار|الأجرة/i,
+  duration: /term|duration|period|month|year|مدة|فترة|شهر|سنة|سنوات/i,
+  dates: /date|commencement|expiry|start|end|تاريخ|بداية|نهاية|انتهاء/i,
+  obligations: /obligation|condition|clause|article|شرط|بند|التزام|المادة/i
+} as const;
+
+const ATTESTATION_MARKERS = {
+  signatures: /signature|sign|signed|توقيع|موقع|التوقيع/i,
+  witnesses: /witness|witnesses|شاهد|شهود/i,
+  stamp: /stamp|seal|official|ختم|مصدق|التصديق/i,
+  declaration: /attest|attestation|declare|declaration|إقرار|يشهد|شهادة/i,
+  idProof: /id|identity|passport|emirates id|هوية|بطاقة|جواز/i
+} as const;
+
+let cachedTemplatesPromise: Promise<TemplateProfile[]> | null = null;
+
+function normalizeText(input: string): string {
+  return input
+    .normalize('NFKC')
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .trim();
+}
+
+function tokenize(input: string): Set<string> {
+  const normalized = normalizeText(input);
+  const tokens = normalized
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3)
+    .filter((token) => !EN_STOPWORDS.has(token) && !AR_STOPWORDS.has(token));
+  return new Set(tokens);
+}
+
+function jaccardSimilarity(first: Set<string>, second: Set<string>): number {
+  if (first.size === 0 || second.size === 0) return 0;
+
+  let intersection = 0;
+  for (const token of first) {
+    if (second.has(token)) intersection += 1;
+  }
+  const union = first.size + second.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function extractFormatMarkerHits(text: string): Record<string, boolean> {
+  return {
+    parties: FORMAT_MARKERS.parties.test(text),
+    property: FORMAT_MARKERS.property.test(text),
+    rent: FORMAT_MARKERS.rent.test(text),
+    duration: FORMAT_MARKERS.duration.test(text),
+    dates: FORMAT_MARKERS.dates.test(text),
+    obligations: FORMAT_MARKERS.obligations.test(text)
+  };
+}
+
+function extractAttestationSet(text: string): Set<string> {
+  const set = new Set<string>();
+  if (ATTESTATION_MARKERS.signatures.test(text)) set.add('signatures');
+  if (ATTESTATION_MARKERS.witnesses.test(text)) set.add('witnesses');
+  if (ATTESTATION_MARKERS.stamp.test(text)) set.add('stamp');
+  if (ATTESTATION_MARKERS.declaration.test(text)) set.add('declaration');
+  if (ATTESTATION_MARKERS.idProof.test(text)) set.add('idProof');
+  return set;
+}
+
+async function loadTemplateProfiles(): Promise<TemplateProfile[]> {
+  if (cachedTemplatesPromise) return cachedTemplatesPromise;
+
+  cachedTemplatesPromise = (async () => {
+    const entries = await Promise.all(
+      Object.entries(TEMPLATE_FILES).map(async ([type, absolutePath]) => {
+        const buffer = await fs.readFile(absolutePath);
+        const parsed = await pdfParse(buffer);
+        const text = parsed.text || '';
+        const normalizedText = normalizeText(text);
+        const tokenSet = tokenize(text);
+        const attestationSet = extractAttestationSet(text);
+
+        return {
+          type: type as ContractTemplateType,
+          text,
+          normalizedText,
+          tokenSet,
+          attestationSet
+        } satisfies TemplateProfile;
+      })
+    );
+
+    return entries;
+  })();
+
+  return cachedTemplatesPromise;
+}
 
 /**
  * Tool for uploading and processing documents
@@ -101,5 +243,116 @@ export const confirmExtractedDataTool = new FunctionTool({
       message: 'User confirmed the extracted data is correct.',
       corrections: corrections || 'None'
     };
+  }
+});
+
+/**
+ * Tool for validating whether an uploaded rental contract is legitimate.
+ * The uploaded contract must resemble one of the official reference templates
+ * (commercial or residential) in format and attestation indicators.
+ */
+export const validateContractLegitimacyTool = new FunctionTool({
+  name: 'validate_contract_legitimacy',
+  description: 'Validates whether a rental contract is legitimate by comparing it against reference commercial/residential contract templates and checking attestation similarity.',
+  parameters: z.object({
+    textContent: z.string().describe('Full extracted text of the uploaded rental contract'),
+    fileName: z.string().optional().describe('Optional uploaded file name for reporting')
+  }),
+  execute: async ({ textContent, fileName }) => {
+    const normalizedDocumentText = normalizeText(textContent || '');
+    if (!normalizedDocumentText || normalizedDocumentText.length < 120) {
+      return {
+        status: 'failed',
+        isLegitContract: false,
+        reasonCode: 'INSUFFICIENT_TEXT' satisfies ContractValidationReasonCode,
+        reason: 'Insufficient extracted text to verify contract format and attestation.'
+      };
+    }
+
+    try {
+      const templates = await loadTemplateProfiles();
+      if (templates.length === 0) {
+        return {
+          status: 'failed',
+          isLegitContract: false,
+          reasonCode: 'REFERENCE_UNAVAILABLE' satisfies ContractValidationReasonCode,
+          reason: 'Reference contract templates are unavailable for verification.'
+        };
+      }
+
+      const documentTokenSet = tokenize(textContent);
+      const formatHits = extractFormatMarkerHits(textContent);
+      const formatHitCount = Object.values(formatHits).filter(Boolean).length;
+      const formatCoverage = formatHitCount / Object.keys(formatHits).length;
+      const documentAttestationSet = extractAttestationSet(textContent);
+
+      const perTemplate = templates.map((template) => {
+        const lexicalSimilarity = jaccardSimilarity(documentTokenSet, template.tokenSet);
+        const attestationSimilarity = jaccardSimilarity(documentAttestationSet, template.attestationSet);
+        const combinedSimilarity = (lexicalSimilarity * 0.7) + (formatCoverage * 0.2) + (attestationSimilarity * 0.1);
+
+        return {
+          templateType: template.type,
+          lexicalSimilarity,
+          attestationSimilarity,
+          combinedSimilarity,
+          templateAttestationMarkers: Array.from(template.attestationSet)
+        };
+      });
+
+      const bestMatch = perTemplate.sort((a, b) => b.combinedSimilarity - a.combinedSimilarity)[0];
+
+      const hasSimilarFormat = formatHitCount >= 4 && bestMatch.lexicalSimilarity >= 0.08;
+      const hasSimilarAttestation = documentAttestationSet.size >= 2 && bestMatch.attestationSimilarity >= 0.34;
+      const isLegitContract = hasSimilarFormat && hasSimilarAttestation;
+
+      let reasonCode: ContractValidationReasonCode = 'VALID_CONTRACT';
+      if (!isLegitContract) {
+        if (!hasSimilarFormat && !hasSimilarAttestation) {
+          reasonCode = 'FORMAT_AND_ATTESTATION_MISMATCH';
+        } else if (!hasSimilarFormat) {
+          reasonCode = 'FORMAT_MISMATCH';
+        } else if (!hasSimilarAttestation) {
+          reasonCode = 'ATTESTATION_MISMATCH';
+        }
+      }
+
+      const missingFormatItems = Object.entries(formatHits)
+        .filter(([, found]) => !found)
+        .map(([key]) => key);
+
+      const resultMessage = isLegitContract
+        ? `Contract appears legitimate and is similar to the ${bestMatch.templateType} reference format and attestation.`
+        : 'Contract legitimacy check failed: format and/or attestation does not sufficiently match reference templates.';
+
+      return {
+        status: isLegitContract ? 'success' : 'failed',
+        fileName: fileName || null,
+        isLegitContract,
+        reasonCode,
+        matchedTemplateType: bestMatch.templateType,
+        checks: {
+          hasSimilarFormat,
+          hasSimilarAttestation,
+          formatCoverage,
+          lexicalSimilarity: bestMatch.lexicalSimilarity,
+          attestationSimilarity: bestMatch.attestationSimilarity
+        },
+        findings: {
+          detectedFormatMarkers: formatHits,
+          missingFormatItems,
+          documentAttestationMarkers: Array.from(documentAttestationSet),
+          referenceAttestationMarkers: bestMatch.templateAttestationMarkers
+        },
+        message: resultMessage
+      };
+    } catch (error) {
+      return {
+        status: 'failed',
+        isLegitContract: false,
+        reasonCode: 'VALIDATION_ERROR' satisfies ContractValidationReasonCode,
+        reason: `Unable to complete template-based contract legitimacy verification: ${(error as Error).message}`
+      };
+    }
   }
 });
